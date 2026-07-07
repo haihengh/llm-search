@@ -1,6 +1,10 @@
-"""FastAPI server — OpenAI-compatible API with tool-call interception.
+"""FastAPI server — OpenAI + Anthropic API with tool-call interception.
 
-Exposes /v1/chat/completions, /health, and /stats.
+OpenAI endpoint:   POST /v1/chat/completions
+Anthropic endpoint: POST /v1/messages
+Health:            GET  /health
+Stats:             GET  /stats
+
 The tool loop runs server-side: the client makes one request and
 gets back the final answer after all searches are complete.
 """
@@ -24,6 +28,11 @@ from .search.base import SearchProvider
 from .search.brave import BraveSearchProvider
 from .search.searxng import SearXNGSearcher
 from .search.serpapi import SerpAPIProvider
+from .anthropic_adapter import (
+    anthropic_request_to_openai,
+    anthropic_stream_from_openai,
+    openai_response_to_anthropic,
+)
 from .tool_loop import (
     LMStudioError,
     ToolLoopExhaustedError,
@@ -308,6 +317,100 @@ async def chat_completions(request: Request, body: ChatRequest):
     ],
         usage=ChatResponseUsage(),
     )
+
+
+# ── Anthropic Messages API ─────────────────────────────────────
+
+class AnthropicErrorResponse(BaseModel):
+    type: str = "error"
+    error: dict[str, Any]
+
+
+@app.post("/v1/messages")
+async def messages(request: Request):
+    """Anthropic Messages API endpoint.
+
+    Translates Anthropic-format requests to OpenAI internally,
+    runs the tool loop, and translates responses back.
+
+    Supports both non-streaming and streaming (stream=True in body),
+    though streaming is sent as a single SSE text_delta for simplicity.
+    """
+    global _request_count, _total_searches
+
+    # Rate limit
+    client_id = get_client_id(request)
+    if not rate_limiter.is_allowed(client_id):
+        raise HTTPException(status_code=429, detail="Too many requests.")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    _request_count += 1
+
+    # Translate Anthropic → OpenAI
+    openai_req = anthropic_request_to_openai(body)
+    use_stream = body.get("stream", False)
+    model = body.get("model", "local-model")
+
+    try:
+        if use_stream:
+            # Streaming path — translate OpenAI SSE to Anthropic SSE
+            chatcmpl_id = f"msg_{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
+
+            async def sse_wrapper():
+                try:
+                    async for chunk in anthropic_stream_from_openai(
+                        run_tool_loop_streaming(
+                            messages=openai_req["messages"],
+                            search_provider=get_search_provider(),
+                            chatcmpl_id=chatcmpl_id,
+                            created=created,
+                            tools=openai_req["tools"],
+                            model=openai_req["model"],
+                        ),
+                        model=model,
+                        request_id=chatcmpl_id,
+                    ):
+                        yield chunk
+                except Exception:
+                    logger.exception("Error in Anthropic streaming")
+                    yield (
+                        "event: message_stop\n"
+                        'data: {"type":"message_stop"}\n\n'
+                    )
+
+            return StreamingResponse(
+                sse_wrapper(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
+
+        # Non-streaming path
+        result = await run_tool_loop(
+            messages=openai_req["messages"],
+            search_provider=get_search_provider(),
+            tools=openai_req["tools"],
+            model=openai_req["model"],
+        )
+
+        _total_searches += result.get("searches", 0)
+
+        return openai_response_to_anthropic(result, model)
+
+    except LMStudioError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except ToolLoopExhaustedError as exc:
+        return openai_response_to_anthropic(
+            {"content": str(exc), "tool_calls_count": 0, "iterations": 5, "searches": 0},
+            model,
+        )
 
 
 @app.get("/health", response_model=HealthResponse)

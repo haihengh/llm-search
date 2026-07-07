@@ -1,5 +1,7 @@
 # LLM Search
 
+[English](./README.md) | [中文](./README_zh.md)
+
 **Give your local LLM internet search — no API keys, no rate limits, no signups.**
 
 One `docker compose up` bundles a self-hosted search engine (SearXNG) with middleware that wires it into LM Studio's tool-calling. Your LLM stays local, your search stays private, and nothing depends on a third-party service.
@@ -164,35 +166,27 @@ llm-search
 
 ### Claude Code (CLI)
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) can use the middleware as a custom OpenAI provider for its tool-enabled models.
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) connects natively via the Anthropic Messages API. The middleware exposes `/v1/messages` which accepts Anthropic-format requests directly — no translation layer needed.
 
 **1. Start the middleware** (see LM Studio or Ollama section above).
 
-**2. Configure Claude Code** — add to `~/.claude/settings.json`:
-```json
-{
-  "customProviders": {
-    "llm-search": {
-      "baseUrl": "http://localhost:8000/v1",
-      "apiKey": "not-needed"
-    }
-  }
-}
-```
-
-**3. Use in Claude Code:**
+**2. Set environment variables:**
 ```bash
-claude --model llm-search/qwythos-9b-claude-mythos-5-1m "What is the latest Go version?"
+export ANTHROPIC_BASE_URL=http://localhost:8000
+export ANTHROPIC_AUTH_TOKEN=not-needed
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0
 ```
 
-Or set as default in `.claude/settings.json`:
-```json
-{
-  "model": "llm-search/qwythos-9b-claude-mythos-5-1m"
-}
+**3. Use Claude Code normally — it now searches the web:**
+```bash
+claude "What is the latest Go version?"
+claude "Search for the current Bitcoin price and tell me the trend"
+claude "Read the Python 3.14 release notes and summarize new features"
 ```
 
-> Claude Code sends tool definitions with each request. The middleware preserves them alongside the auto-injected `web_search` and `fetch_page` tools.
+That's it. Claude Code sends Anthropic-format requests → middleware translates internally → runs tool loop → returns Anthropic-format responses with `web_search` and `fetch_page` auto-injected.
+
+> The middleware preserves any tools Claude Code sends alongside the auto-injected search tools.
 
 ---
 
