@@ -5,6 +5,7 @@ The tool loop runs server-side: the client makes one request and
 gets back the final answer after all searches are complete.
 """
 
+import json
 import logging
 import time
 import uuid
@@ -13,7 +14,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .cache import cache as search_cache
@@ -27,6 +28,7 @@ from .tool_loop import (
     LMStudioError,
     ToolLoopExhaustedError,
     run_tool_loop,
+    run_tool_loop_streaming,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,18 +221,47 @@ async def chat_completions(request: Request, body: ChatRequest):
             detail="Too many requests. Please slow down.",
         )
 
-    # Streaming not supported yet
-    if body.stream:
-        raise HTTPException(
-            status_code=400,
-            detail="Streaming is not yet supported. Use stream=false.",
-        )
-
     _request_count += 1
 
     # Convert messages to dicts
     messages = [msg.model_dump(exclude_none=True) for msg in body.messages]
 
+    # ── Streaming path ──────────────────────────────────────
+    if body.stream:
+        chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+
+        async def sse_safe_wrapper():
+            """Wrap the streaming generator with fallback error handling."""
+            try:
+                async for chunk in run_tool_loop_streaming(
+                    messages=messages,
+                    search_provider=get_search_provider(),
+                    chatcmpl_id=chatcmpl_id,
+                    created=created,
+                    tools=body.tools,
+                    model=body.model,
+                ):
+                    yield chunk
+            except Exception:
+                logger.exception("Unhandled error during streaming")
+                error_data = json.dumps(
+                    {"error": {"message": "Internal server error", "type": "internal_error"}}
+                )
+                yield f"data: {error_data}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            sse_safe_wrapper(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── Non-streaming path ──────────────────────────────────
     try:
         result = await run_tool_loop(
             messages=messages,

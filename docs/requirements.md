@@ -31,19 +31,35 @@ docker compose version   # 2.0+
 
 ### 3. A Compatible Model
 
-The model MUST support function/tool calling in OpenAI format. Not all models do.
+The model MUST support function/tool calling in OpenAI format. Not all models do — here are our actual test results:
 
-| Model | Size | Tool Calling | RAM | Recommended? |
-|-------|------|-------------|-----|--------------|
-| **Llama 3.1 8B Instruct** | ~5 GB | ✅ Reliable | 8 GB | ✅ Best all-around |
-| **Qwen 2.5 7B Instruct** | ~4.5 GB | ✅ Reliable | 8 GB | ✅ Excellent tool use |
-| **Mistral Nemo 12B** | ~7 GB | ✅ Reliable | 12 GB | ✅ Strong, needs more RAM |
-| **Llama 3.2 3B Instruct** | ~2 GB | ⚠️ Weaker | 4 GB | ⚠️ For low-resource systems |
-| **Phi-3 Mini 4K** | ~2.5 GB | ⚠️ Weaker | 4 GB | ⚠️ Hit or miss on tool calling |
+**✅ Works — end-to-end tested with this middleware:**
 
-**Recommendation**: Start with **Llama 3.1 8B Instruct** or **Qwen 2.5 7B Instruct**. They're the sweet spot of quality, tool-calling reliability, and hardware requirements.
+| Model | Size | Notes |
+|-------|------|-------|
+| `qwythos-9b-claude-mythos-5-1m` | 9B | Claude-distilled, fast & reliable |
+| `qwen3.6-27b-claude-mythos-distilled-mtp` | 27B | Claude-distilled, detailed answers |
+| `qwopus3.6-27b-v2-mtp` | 27B | Opus-distilled, thorough answers |
+| `qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved` | 27B | "Native" variant preserves tool-calling |
+| `gemma-4-31b-it-qat` | 31B | Google Gemma IT, solid tool use |
 
-**How to check if your model supports tool calling**: In LM Studio, load the model and look at the chat tab — if you can enable "Tool Use" mode, it supports function calling.
+**❌ Does NOT work — loops without answering:**
+
+| Model | Size | Reason |
+|-------|------|--------|
+| `qwen3.6-27b` | 27B | No OpenAI function-calling support |
+| `qwen3.6-27b@q4_k_m` | 27B Q4 | No tool-calling (quantization may strip it) |
+| `qwen3.6-35b-a3b` | 35B | No tool-calling |
+
+**⏱️ Untested (timed out — likely works but model was too slow):**
+
+| Model | Size |
+|-------|------|
+| `qwen3.6-27b-mtp` | 31B |
+
+**Pattern**: Claude/Opus-distilled Qwen models and Google Gemma IT models handle tool-calling reliably. Base Qwen models do not — they lack the OpenAI function-calling training. Look for "mythos", "opus", "claude-distilled", or "native" in the model name for Qwen variants. For Gemma, use the "it" (instruction-tuned) variants.
+
+**Recommendation**: `qwythos-9b-claude-mythos-5-1m` is the best tradeoff — small, fast, and reliable tool-calling.
 
 ---
 
@@ -167,6 +183,21 @@ Or set `LM_STUDIO_URL=http://172.17.0.1:1234/v1` (Docker's default gateway to ho
 
 ### Rate limited by upstream search engines (rare)
 
-SearXNG queries Google/Bing/etc. Heavy usage might trigger temporary blocks from individual engines. SearXNG automatically rotates to other engines. If it happens persistently:
-- Enable more engines in `searxng/settings.yml`
-- Consider using Brave API as a fallback (`SEARCH_PROVIDER=brave`)
+SearXNG queries Google, Bing, DuckDuckGo, etc. Each engine has its own rate limits. Under rapid-fire use (e.g., testing many searches in quick succession), some engines may get temporarily suspended:
+
+- **DuckDuckGo**: common CAPTCHA during testing — resolves on its own within minutes
+- **Google**: may suspend for 180s under heavy load — self-recovers
+- **Brave**: same 180s suspension pattern
+
+SearXNG handles this automatically: suspended engines are skipped and other engines fill in. Results may be fewer during a suspension window, but search still works. Normal single-user usage rarely triggers this — we only hit it during batch testing.
+
+If it happens persistently:
+- Wait 3-5 minutes for suspensions to expire
+- The middleware health check (every 30s) uses a lightweight `/healthz` endpoint that doesn't count toward search engine quotas
+- Consider adding a search API key as backup: `SEARCH_PROVIDER=brave` with `SEARCH_API_KEY=...`
+- To disable problematic engines, override in `searxng/settings.yml`:
+  ```yaml
+  engines:
+    - name: duckduckgo
+      disabled: true
+  ```

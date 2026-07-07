@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     # --- LM Studio ---
     lm_studio_url: str = "http://host.docker.internal:1234/v1"
+    lm_studio_timeout: float = 120.0
 
     # --- Middleware server ---
     middleware_host: str = "0.0.0.0"

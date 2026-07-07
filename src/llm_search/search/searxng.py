@@ -70,10 +70,11 @@ class SearXNGSearcher(SearchProvider):
             raise
 
     async def health_check(self) -> bool:
-        """Check if SearXNG is reachable."""
+        """Check if SearXNG is reachable (without triggering search engine queries)."""
         client = await self._get_client()
         try:
-            response = await client.get(f"{self._base_url}/search?q=test&format=json")
+            # Use /healthz — a lightweight endpoint that doesn't query search engines
+            response = await client.get(f"{self._base_url}/healthz")
             return response.status_code == 200
         except httpx.HTTPError:
             return False

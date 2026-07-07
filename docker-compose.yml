@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ── Self-hosted metasearch engine ──────────────────────────
   # Queries Google, Bing, DuckDuckGo, etc. anonymously.
@@ -24,6 +22,8 @@ services:
   # ── Middleware: bridges chat clients → LM Studio + search ──
   llm-search:
     build: .
+    # For prebuilt image from GitHub Container Registry, replace "build: ." with:
+    # image: ghcr.io/haihengh/llm-search:latest
     container_name: llm-search-middleware
     ports:
       - "${MIDDLEWARE_PORT:-8000}:8000"
