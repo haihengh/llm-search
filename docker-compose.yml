@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  # ── Self-hosted metasearch engine ──────────────────────────
+  # Queries Google, Bing, DuckDuckGo, etc. anonymously.
+  # No API keys. No rate limits. No external accounts.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: llm-search-searxng
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    environment:
+      - SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    restart: unless-stopped
+    # No ports exposed to host — only the middleware talks to SearXNG
+    # This means no one outside Docker can use your search engine
+
+  # ── Middleware: bridges chat clients → LM Studio + search ──
+  llm-search:
+    build: .
+    container_name: llm-search-middleware
+    ports:
+      - "${MIDDLEWARE_PORT:-8000}:8000"
+    environment:
+      # Search provider (searxng is the default — no API key needed)
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-searxng}
+      - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
+      - SEARCH_API_KEY=${SEARCH_API_KEY:-}
+
+      # LM Studio on the host machine
+      - LM_STUDIO_URL=${LM_STUDIO_URL:-http://host.docker.internal:1234/v1}
+
+      # Limits
+      - MAX_TOOL_LOOP_ITERATIONS=${MAX_TOOL_LOOP_ITERATIONS:-5}
+      - SEARCH_CACHE_TTL_SECONDS=${SEARCH_CACHE_TTL_SECONDS:-300}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-30}
+      - MAX_SEARCH_RESULTS=${MAX_SEARCH_RESULTS:-5}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    extra_hosts:
+      # Allows Docker containers to reach the host machine (where LM Studio runs)
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - searxng
+    restart: unless-stopped

@@ -1,0 +1,48 @@
+# ── SearXNG Configuration for LLM Search ─────────────────────
+# This is a minimal, tuned config for use as an LLM search backend.
+# SearXNG is internal-only (not exposed to the host), so auth and
+# rate limiting are unnecessary.
+
+use_default_settings: true
+
+general:
+  instance_name: "LLM Search"
+  debug: false
+  privacypolicy_url: false
+  contact_url: false
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - json            # We only need the JSON API
+  search_on_category_select: false
+
+server:
+  secret_key: "llm-search-change-this-in-production"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false       # Rate limiting disabled — internal use only
+  public_instance: false
+  image_proxy: false   # No need to proxy images for LLM consumption
+
+ui:
+  enabled: false        # No web UI needed
+
+# Enabled engines — the default set is fine for most use.
+# SearXNG will query these and aggregate results.
+# To customize, uncomment and edit:
+# engines:
+#   - name: google
+#     engine: google
+#     disabled: false
+#   - name: duckduckgo
+#     engine: duckduckgo
+#     disabled: false
+#   - name: bing
+#     engine: bing
+#     disabled: false
+#   - name: wikipedia
+#     engine: wikipedia
+#     disabled: false

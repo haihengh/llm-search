@@ -1,0 +1,13 @@
+# SearXNG rate limiter — disabled because:
+# 1. SearXNG is internal-only (not exposed to host)
+# 2. Our middleware handles rate limiting
+# 3. Only one consumer exists (the middleware)
+
+[botdetection.ip_limit]
+# Disable IP-based rate limiting
+link_token = false
+
+[botdetection.ip_lists]
+# No IP blocking needed
+pass_ip = []
+block_ip = []
