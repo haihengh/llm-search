@@ -20,7 +20,7 @@ search:
   search_on_category_select: false
 
 server:
-  secret_key: "llm-search-change-this-in-production"
+  secret_key: "llm-search-change-this-in-production" # It's a dummy value. SearXNG isn't exposed to the network (no ports mapped in docker-compose), so it's not a real risk. But if someone ever exposes SearXNG directly, they'd need to change it.
   bind_address: "0.0.0.0"
   port: 8080
   limiter: false       # Rate limiting disabled — internal use only

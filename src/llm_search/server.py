@@ -413,6 +413,34 @@ async def messages(request: Request):
         )
 
 
+@app.get("/v1/models")
+async def list_models():
+    """Proxy the models list from the LLM backend.
+
+    Chat clients call this to discover available models. The middleware
+    proxies the request to LM Studio / Ollama so clients see the full
+    model catalog, no matter what machine the LLM is running on.
+    """
+    import httpx
+
+    url = f"{settings.lm_studio_url.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.json()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM backend not reachable at {settings.lm_studio_url}",
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM backend returned {exc.response.status_code}",
+        )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Health check — returns connectivity status for all components."""

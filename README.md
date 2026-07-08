@@ -137,6 +137,30 @@ docker compose up -d
 
 ---
 
+### Cross-Machine Setup (LLM on a different computer)
+
+You can run the middleware on one machine and the LLM on another. This is useful when your GPU is in a desktop but you want to access it from a laptop.
+
+**On the LLM machine (with the GPU):**
+```bash
+# LM Studio: Developer tab → start server on 0.0.0.0:1234
+# Or Ollama: set OLLAMA_HOST=0.0.0.0:11434
+```
+
+**On the middleware machine:**
+```bash
+export LM_STUDIO_URL=http://192.168.1.50:1234/v1  # replace with your LLM machine's IP
+docker compose up -d
+```
+
+**On any client machine:**
+```
+API Base URL: http://MIDDLEWARE_IP:8000/v1
+# Clients can also call GET /v1/models to discover available models
+```
+
+> The middleware proxies `/v1/models` to the LLM backend, so chat clients see the full model list no matter where the LLM is running.
+
 ### Ollama
 
 [Ollama](https://ollama.com/) is a lightweight alternative to LM Studio. It runs models and exposes an OpenAI-compatible API on port 11434.
