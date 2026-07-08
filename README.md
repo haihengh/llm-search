@@ -327,6 +327,30 @@ cp .env.example .env
 
 All configuration via environment variables — see `.env.example` for the full list.
 
+## Release Process
+
+Releases follow [Semantic Versioning](https://semver.org/) with a [Keep a Changelog](https://keepachangelog.com/) format.
+
+```bash
+# 1. Add changes under [Unreleased] in CHANGELOG.md
+# 2. Run the release script:
+./scripts/release.sh 0.1.3
+
+# This automatically:
+#   - Updates CHANGELOG.md with the version header
+#   - Commits, tags, and pushes
+#   - Triggers .github/workflows/release.yml which:
+#     → Creates the GitHub Release with auto-generated notes
+#     → Builds + pushes Docker images to GHCR + Docker Hub
+```
+
+Manual release (if script unavailable):
+```bash
+git tag -a v0.1.3 -m "v0.1.3"
+git push --tags
+# The tag triggers the automated release pipeline
+```
+
 ## License
 
 MIT
