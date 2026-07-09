@@ -1,13 +1,14 @@
-name: Publish Docker
+name: Publish Docker (Manual)
+
+# Manual trigger only — for pushing Docker images outside of a release.
+# The automated release pipeline is in release.yml (triggered by v* tags).
 
 on:
-  workflow_call:
   workflow_dispatch:
 
 env:
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   docker:
@@ -15,18 +16,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=manual" >> $GITHUB_OUTPUT
-          else
-            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -47,12 +38,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.GHCR_REGISTRY }}/${{ github.repository }}
             ${{ env.DOCKERHUB_REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/llm-search
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
+            type=sha,prefix=
 
       - name: Build and push
         uses: docker/build-push-action@v6

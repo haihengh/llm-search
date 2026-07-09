@@ -1,14 +1,17 @@
 name: Release
 
-# This is the main release pipeline. Triggered by pushing a v* tag.
-# 1. Generates release notes from commits since the last tag
-# 2. Creates a GitHub Release
-# 3. Triggers Docker build & push to GHCR + Docker Hub
+# Triggered by pushing a v* tag.
+# 1. Creates a GitHub Release with auto-generated notes
+# 2. Builds + pushes Docker images to GHCR and Docker Hub
 
 on:
   push:
     tags:
       - "v*"
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  DOCKERHUB_REGISTRY: docker.io
 
 jobs:
   release:
@@ -31,33 +34,32 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
-          cat > /tmp/release_notes.md << EOF
-          ## What's Changed
+          {
+            echo "## What's Changed"
+            echo ""
+            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details."
+            echo ""
+            echo "### Docker"
+            echo '```bash'
+            echo "docker pull ghcr.io/${{ github.repository }}:latest"
+            echo "docker pull ghcr.io/${{ github.repository }}:${TAG}"
+            echo '```'
+            echo ""
 
-          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md#${TAG//./}---$(date +%Y-%m-%d)) for full details.
-
-          EOF
-
-          if [ -n "$PREV_TAG" ]; then
-            echo "**Full Changelog:** https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}" >> /tmp/release_notes.md
-            echo "" >> /tmp/release_notes.md
-            echo "### Commits" >> /tmp/release_notes.md
-            echo '```' >> /tmp/release_notes.md
-            git log ${PREV_TAG}..HEAD --oneline --no-merges >> /tmp/release_notes.md
-            echo '```' >> /tmp/release_notes.md
-          else
-            echo "### Commits" >> /tmp/release_notes.md
-            echo '```' >> /tmp/release_notes.md
-            git log --oneline --no-merges >> /tmp/release_notes.md
-            echo '```' >> /tmp/release_notes.md
-          fi
-
-          echo "" >> /tmp/release_notes.md
-          echo "### Docker" >> /tmp/release_notes.md
-          echo '```bash' >> /tmp/release_notes.md
-          echo "docker pull ghcr.io/${{ github.repository }}:${TAG}" >> /tmp/release_notes.md
-          echo "docker pull ghcr.io/${{ github.repository }}:latest" >> /tmp/release_notes.md
-          echo '```' >> /tmp/release_notes.md
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full Changelog:** https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+              echo ""
+              echo "### Commits"
+              echo '```'
+              git log "${PREV_TAG}"..HEAD --oneline --no-merges
+              echo '```'
+            else
+              echo "### Commits"
+              echo '```'
+              git log --oneline --no-merges
+              echo '```'
+            fi
+          } > /tmp/release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -70,5 +72,43 @@ jobs:
 
   docker:
     needs: release
-    uses: ./.github/workflows/publish.yml
-    secrets: inherit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.GHCR_REGISTRY }}/${{ github.repository }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/llm-search
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
