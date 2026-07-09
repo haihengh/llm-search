@@ -210,7 +210,7 @@ claude "Read the Python 3.14 release notes and summarize new features"
 
 That's it. Claude Code sends Anthropic-format requests → middleware translates internally → runs tool loop → returns Anthropic-format responses with `web_search` and `fetch_page` auto-injected.
 
-> The middleware preserves any tools Claude Code sends alongside the auto-injected search tools.
+> The middleware only sends `web_search` + `fetch_page` to the LLM — Claude Code's own tools (Bash, Read, Write, etc.) are stripped and handled by Claude Code itself. This prevents small local models from getting confused by too many tools. If the LLM can't converge on an answer, the middleware returns accumulated search results as a fallback instead of an error.
 
 ---
 

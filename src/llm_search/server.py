@@ -303,18 +303,24 @@ async def chat_completions(request: Request, body: ChatRequest):
 
     _total_searches += result.get("searches", 0)
 
+    # Build the assistant message, including any passthrough tool calls
+    assistant_msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": result["content"],
+    }
+    if result.get("tool_calls"):
+        assistant_msg["tool_calls"] = result["tool_calls"]
+
     return ChatResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
-    created=int(time.time()),
-    model=body.model,
-    choices=[
-        ChatResponseChoice(
-            message={
-                "role": "assistant",
-                "content": result["content"],
-            },
-        )
-    ],
+        created=int(time.time()),
+        model=body.model,
+        choices=[
+            ChatResponseChoice(
+                message=assistant_msg,
+                finish_reason=result.get("finish_reason", "stop"),
+            )
+        ],
         usage=ChatResponseUsage(),
     )
 

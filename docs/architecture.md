@@ -112,10 +112,19 @@ A FastAPI server that presents an OpenAI-compatible `/v1/chat/completions` endpo
 ```python
 async def chat_completions(request: ChatRequest) -> ChatResponse:
     conversation = request.messages
-    tools = inject_web_search_tool(request.tools)
+    # Only search tools are sent to the LLM — client tools (bash, read,
+    # etc.) are stripped to avoid confusing small local models.
+    tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
     iterations = 0
 
     while iterations < MAX_LOOP_ITERATIONS:
+        # On later iterations, nudge the LLM to answer
+        if iterations >= MAX_LOOP_ITERATIONS - 2 and searches_done:
+            conversation.append({
+                "role": "user",
+                "content": "Please synthesize a final answer now."
+            })
+
         response = await lm_studio.chat(
             messages=conversation,
             tools=tools,
@@ -124,25 +133,30 @@ async def chat_completions(request: ChatRequest) -> ChatResponse:
 
         if response.has_tool_calls():
             for tool_call in response.tool_calls:
-                if tool_call.name == "web_search":
+                if tool_call.name in TOOL_EXECUTORS:
                     results = await search_provider.search(tool_call.args.query)
                     conversation.append({
                         role: "tool",
                         tool_call_id: tool_call.id,
                         content: format_search_results(results),
                     })
+                else:
+                    # Unrecognised tool — pass through to client
+                    return response  # stop_reason: "tool_use"
+
             iterations += 1
             continue  # loop — feed results back to LLM
 
         # No tool calls — this is the final answer
         return response
 
-    raise MaxIterationsExceeded()
+    # Max iterations — return accumulated search results as fallback
+    return build_fallback_from_search_results(conversation)
 ```
 
 **Tool definition injected automatically:**
 
-The middleware always adds `web_search` to the tools list. The client doesn't need to define it (though it can override the definition). This means a bare request with no `tools` field still gets search capability.
+The middleware always sends `web_search` and `fetch_page` to the LLM. Client-provided tools are **not** forwarded — the local model only sees search tools. This prevents small models from getting confused by tools they shouldn't call (e.g. Claude Code's Bash/Read/Write). The client handles its own tools; the middleware only handles search.
 
 ```json
 {
@@ -250,7 +264,7 @@ MIDDLEWARE_HOST=0.0.0.0
 MIDDLEWARE_PORT=8000
 
 # --- Limits ---
-MAX_TOOL_LOOP_ITERATIONS=5
+MAX_TOOL_LOOP_ITERATIONS=10
 SEARCH_CACHE_TTL_SECONDS=300
 RATE_LIMIT_PER_MINUTE=30         # Higher default since SearXNG has no API cost
 MAX_SEARCH_RESULTS=5
@@ -308,7 +322,7 @@ OpenAI-compatible chat completions. Handles the tool-call loop internally.
 }
 ```
 
-**With explicit tools (additional tools are preserved):**
+**With explicit tools (client tools are NOT forwarded to the LLM):**
 
 ```json
 {
@@ -320,7 +334,7 @@ OpenAI-compatible chat completions. Handles the tool-call loop internally.
 }
 ```
 
-The middleware adds `web_search` alongside the user's tools.
+The middleware sends only `web_search` + `fetch_page` to the LLM. Client tools are stripped — the client (e.g. Claude Code) handles them itself. If the LLM hallucinates a tool name not in the middleware's registry, it's passed through to the client as a `stop_reason: "tool_use"` response.
 
 ### `GET /health`
 
@@ -357,7 +371,7 @@ The middleware adds `web_search` alongside the user's tools.
 | LM Studio unreachable | 502 — `{"error": "LM Studio not reachable at http://..."}`  |
 | SearXNG unreachable | 502 — `{"error": "Search engine not available"}` |
 | SearXNG returns no results | Empty results passed to LLM — it informs the user naturally |
-| Tool loop exceeds max iterations | 200 — returns partial response with `finish_reason: "tool_loop_max"` |
+| Tool loop exceeds max iterations | 200 — returns accumulated search results as fallback with `finish_reason: "tool_loop_max"` |
 | Client sends malformed tools | 400 — validation error |
 | Rate limit hit | 429 — `{"error": "Too many requests", "retry_after": 5}` |
 

@@ -13,7 +13,14 @@ import httpx
 
 from .config import settings
 from .search.base import SearchProvider
-from .tool_registry import dispatch_tool, inject_tools, WEB_SEARCH
+from .tool_registry import (
+    FETCH_PAGE,
+    FETCH_PAGE_TOOL,
+    TOOL_EXECUTORS,
+    WEB_SEARCH,
+    WEB_SEARCH_TOOL,
+    dispatch_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +171,10 @@ async def run_tool_loop(
     url = lm_studio_url or settings.lm_studio_url
     max_iter = settings.max_tool_loop_iterations
 
-    # Inject web_search tool
-    all_tools = inject_tools(tools)
+    # Only pass search tools to the LLM — client tools (bash, read, etc.)
+    # are handled by the client itself (e.g. Claude Code's agentic loop).
+    # Injecting all client tools confuses small local models.
+    all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
 
     conversation = list(messages)  # Copy — we'll mutate this
     total_searches = 0
@@ -173,6 +182,19 @@ async def run_tool_loop(
 
     for iteration in range(1, max_iter + 1):
         logger.debug("Tool loop iteration %d/%d", iteration, max_iter)
+
+        # On later iterations, nudge the LLM to synthesize an answer
+        # instead of searching again. Small local models sometimes get
+        # stuck in a search → search → search loop without this reminder.
+        if iteration >= max_iter - 1 and total_searches > 0:
+            conversation.append({
+                "role": "user",
+                "content": (
+                    "You now have search results. Please synthesize a "
+                    "final answer based on what you found. Do NOT call "
+                    "web_search again — answer the user's question now."
+                ),
+            })
 
         # Send to LM Studio
         response = await call_lm_studio(
@@ -201,8 +223,19 @@ async def run_tool_loop(
         }
         conversation.append(assistant_message)
 
-        # Execute each tool call
+        # Split tool calls: recognised (we handle) vs unrecognised (passthrough to client)
+        our_tool_calls = []
+        their_tool_calls = []
         for tc in tool_calls:
+            tool_name = tc.get("function", {}).get("name", "")
+            if tool_name in TOOL_EXECUTORS:
+                our_tool_calls.append(tc)
+            else:
+                their_tool_calls.append(tc)
+                logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+
+        # Execute recognised tools and feed results back to conversation
+        for tc in our_tool_calls:
             tool_name = tc.get("function", {}).get("name", "")
 
             # Parse arguments
@@ -238,13 +271,49 @@ async def run_tool_loop(
             }
             conversation.append(tool_message)
 
+        # If the LLM called tools we don't recognise, return them to the
+        # client so it can execute them (e.g. Claude Code's Bash / Read).
+        if their_tool_calls:
+            return {
+                "content": content or "",
+                "tool_calls": their_tool_calls,
+                "tool_calls_count": total_tool_calls,
+                "iterations": iteration,
+                "searches": total_searches,
+                "finish_reason": "tool_calls",
+            }
+
         # Loop continues — LLM sees the search results and responds
 
-    # Max iterations exceeded
-    raise ToolLoopExhaustedError(
-        f"Tool loop exceeded maximum iterations ({max_iter}). "
-        f"Last response had {total_tool_calls} tool calls across {max_iter} iterations."
-    )
+    # Max iterations exceeded — build a graceful fallback from
+    # accumulated search results rather than throwing an error.
+    # Claude Code and other clients can still make use of the raw
+    # search results even if the LLM didn't produce a final answer.
+    search_result_texts: list[str] = []
+    for msg in conversation:
+        if msg.get("role") == "tool" and msg.get("name") == WEB_SEARCH:
+            search_result_texts.append(msg.get("content", ""))
+
+    if search_result_texts:
+        fallback_content = (
+            "I searched multiple times but was unable to synthesize a final answer. "
+            "Here are the raw search results:\n\n" +
+            "\n---\n".join(search_result_texts)
+        )
+    else:
+        fallback_content = (
+            f"Tool loop exceeded maximum iterations ({max_iter}). "
+            f"No search results were collected across {max_iter} iterations. "
+            f"Last response had {total_tool_calls} tool calls."
+        )
+
+    return {
+        "content": fallback_content,
+        "tool_calls_count": total_tool_calls,
+        "iterations": max_iter,
+        "searches": total_searches,
+        "finish_reason": "tool_loop_max",
+    }
 
 
 # ── Streaming Tool Loop ────────────────────────────────────────
@@ -276,7 +345,8 @@ async def run_tool_loop_streaming(
     url = lm_studio_url or settings.lm_studio_url
     max_iter = settings.max_tool_loop_iterations
 
-    all_tools = inject_tools(tools)
+    # Only pass search tools to the LLM (see run_tool_loop for rationale)
+    all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
     conversation = list(messages)
     total_searches = 0
     total_tool_calls = 0
@@ -306,6 +376,17 @@ async def run_tool_loop_streaming(
     try:
         for iteration in range(1, max_iter + 1):
             logger.debug("Tool loop (streaming) iteration %d/%d", iteration, max_iter)
+
+            # On later iterations, nudge the LLM to answer
+            if iteration >= max_iter - 1 and total_searches > 0:
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        "You now have search results. Please synthesize a "
+                        "final answer based on what you found. Do NOT call "
+                        "web_search again — answer the user's question now."
+                    ),
+                })
 
             # Always use non-streaming to check for tool calls
             response = await call_lm_studio(
@@ -351,7 +432,18 @@ async def run_tool_loop_streaming(
             }
             conversation.append(assistant_message)
 
+            # Split into recognised (we handle) vs unrecognised (passthrough)
+            our_tool_calls = []
+            their_tool_calls = []
             for tc in tool_calls:
+                tool_name = tc.get("function", {}).get("name", "")
+                if tool_name in TOOL_EXECUTORS:
+                    our_tool_calls.append(tc)
+                else:
+                    their_tool_calls.append(tc)
+                    logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+
+            for tc in our_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
 
                 try:
@@ -383,13 +475,43 @@ async def run_tool_loop_streaming(
                 }
                 conversation.append(tool_message)
 
-        # Max iterations exceeded
-        yield _error_sse(
-            f"Tool loop exceeded maximum iterations ({max_iter}). "
-            f"Last response had {total_tool_calls} tool calls across {max_iter} iterations.",
-            "tool_loop_exhausted",
-        )
-        yield _chunk_sse({}, "tool_loop_max")
+            # If the LLM called unrecognised tools, return them to the client
+            # as SSE chunks with finish_reason "tool_calls"
+            if their_tool_calls:
+                # Yield initial role chunk
+                yield _chunk_sse({"role": "assistant"})
+                if content:
+                    yield _chunk_sse({"content": content})
+                # Emit tool calls as a delta so the client can parse them
+                yield _chunk_sse(
+                    {"tool_calls": their_tool_calls},
+                    "tool_calls",
+                )
+                yield "data: [DONE]\n\n"
+                return
+
+        # Max iterations exceeded — stream accumulated search results
+        # as a graceful fallback instead of an error.
+        search_result_texts: list[str] = []
+        for msg in conversation:
+            if msg.get("role") == "tool" and msg.get("name") == WEB_SEARCH:
+                search_result_texts.append(msg.get("content", ""))
+
+        if search_result_texts:
+            fallback = (
+                "I searched multiple times but was unable to synthesize a final answer. "
+                "Here are the raw search results:\n\n" +
+                "\n---\n".join(search_result_texts)
+            )
+        else:
+            fallback = (
+                f"Tool loop exceeded maximum iterations ({max_iter}). "
+                f"No search results were collected. "
+                f"Last response had {total_tool_calls} tool calls."
+            )
+
+        yield _chunk_sse({"role": "assistant"})
+        yield _chunk_sse({"content": fallback}, "tool_loop_max")
         yield "data: [DONE]\n\n"
 
     except LMStudioError as exc:

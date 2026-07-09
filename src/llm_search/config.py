@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     middleware_port: int = 8000
 
     # --- Limits ---
-    max_tool_loop_iterations: int = 5
+    max_tool_loop_iterations: int = 10
     search_cache_ttl_seconds: int = 300
     rate_limit_per_minute: int = 30
     max_search_results: int = 5

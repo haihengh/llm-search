@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-09
+
+### Added
+- **Tool filtering** — only `web_search` + `fetch_page` reach the LLM. Client tools (Bash, Read, etc.) from Claude Code are stripped to prevent small local models from getting confused by 12+ tool definitions.
+- **Tool passthrough** — if the LLM calls an unrecognised tool (e.g. hallucinated name), the loop exits early and returns it to the client instead of wasting iterations.
+- **Graceful exhaustion fallback** — when the tool loop reaches max iterations, accumulated search results are returned as content rather than throwing an error. Claude Code can work with the raw search results even if the LLM doesn't synthesise a final answer.
+- **Answer nudge** — on later loop iterations, the middleware injects a reminder telling the LLM to synthesise an answer now rather than searching again.
+
+### Changed
+- **Max tool loop iterations**: 5 → 10. Gives local models more room to converge before the fallback kicks in.
+- Tool loop no longer raises `ToolLoopExhaustedError` — returns a graceful fallback instead.
+- Anthropic adapter now converts passthrough tool calls to proper `tool_use` content blocks with `stop_reason: "tool_use"`.
+
+### Fixed
+- **Claude Code "tool loop exceeded maximum iterations" bug** — caused by flooding the LLM with 12+ client tools. Fixed via tool filtering + passthrough + fallback.
+
 ## [0.1.2] — 2026-07-07
 
 ### Added

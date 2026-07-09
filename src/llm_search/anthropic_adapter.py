@@ -170,6 +170,36 @@ def _extract_tool_result_content(block: dict[str, Any]) -> str:
 
 # ── OpenAI → Anthropic Translation ─────────────────────────────
 
+def _openai_tool_calls_to_anthropic_content(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert OpenAI-format tool_calls to Anthropic tool_use content blocks.
+
+    OpenAI:  {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{...}"}}
+    Anthropic: {"type": "tool_use", "id": "call_1", "name": "bash", "input": {...}}
+    """
+    blocks: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        func = tc.get("function", {})
+        raw_args = func.get("arguments", "{}")
+        if isinstance(raw_args, str):
+            try:
+                import json as _json
+                parsed = _json.loads(raw_args)
+            except _json.JSONDecodeError:
+                parsed = raw_args
+        else:
+            parsed = raw_args
+
+        blocks.append({
+            "type": "tool_use",
+            "id": tc.get("id", ""),
+            "name": func.get("name", ""),
+            "input": parsed,
+        })
+    return blocks
+
+
 def openai_response_to_anthropic(
     openai_result: dict[str, Any],
     model: str,
@@ -178,17 +208,32 @@ def openai_response_to_anthropic(
     """Convert an OpenAI tool_loop result to Anthropic Messages format.
 
     OpenAI result: {"content": "...", "tool_calls_count": N, "iterations": N, "searches": N}
+    When tool_calls are present (passthrough), returns stop_reason: "tool_use".
     """
     msg_id = request_id or f"msg_{uuid.uuid4().hex[:12]}"
     content_text = openai_result.get("content", "")
+    passthrough_tool_calls = openai_result.get("tool_calls", [])
+    finish_reason = openai_result.get("finish_reason", "end_turn")
+
+    # Build content blocks
+    content_blocks: list[dict[str, Any]] = []
+    if content_text:
+        content_blocks.append({"type": "text", "text": content_text})
+
+    if passthrough_tool_calls:
+        content_blocks.extend(
+            _openai_tool_calls_to_anthropic_content(passthrough_tool_calls)
+        )
+
+    stop_reason = "tool_use" if passthrough_tool_calls else "end_turn"
 
     return {
         "id": msg_id,
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{"type": "text", "text": content_text}],
-        "stop_reason": "end_turn",
+        "content": content_blocks,
+        "stop_reason": stop_reason,
         "usage": {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -231,6 +276,7 @@ async def anthropic_stream_from_openai(
     content_parts = []
     finish_reason = None
     started = False
+    error_message = None
 
     async for line in stream_generator:
         line = line.strip()
@@ -243,6 +289,11 @@ async def anthropic_stream_from_openai(
             try:
                 chunk = json_mod.loads(data)
             except json_mod.JSONDecodeError:
+                continue
+
+            # Check for error SSE chunks (e.g. tool_loop_exhausted)
+            if "error" in chunk:
+                error_message = chunk["error"].get("message", "Unknown error")
                 continue
 
             choices = chunk.get("choices", [])
@@ -296,8 +347,11 @@ async def anthropic_stream_from_openai(
             f"data: {json_mod.dumps({'type': 'message_stop'})}\n\n"
         )
     else:
-        # No content was produced — emit error as a message
-        full_text = "Tool loop exceeded maximum iterations or an error occurred."
+        # No content was produced — emit the captured error or a generic fallback
+        full_text = error_message or (
+            "The request completed without producing content. "
+            "This may indicate the model did not generate a response."
+        )
         yield (
             "event: message_start\n"
             f"data: {json_mod.dumps({'type': 'message_start', 'message': {'id': request_id, 'type': 'message', 'role': 'assistant', 'model': model, 'content': [], 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
