@@ -168,6 +168,47 @@ def _extract_tool_result_content(block: dict[str, Any]) -> str:
     return str(result_content)
 
 
+# ── Tool-call validation ──────────────────────────────────────
+
+def _validate_openai_tool_call(tc: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate and sanitize a single OpenAI-format tool call.
+
+    Rejects tool calls with missing or empty function names, missing IDs,
+    or unparseable arguments. Returns a cleaned dict or None.
+    """
+    func = tc.get("function")
+    if not isinstance(func, dict):
+        return None
+
+    name = (func.get("name") or "").strip()
+    if not name:
+        return None
+
+    # Parse + re-serialize arguments to guarantee valid JSON
+    raw_args = func.get("arguments", "{}")
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return None  # unparseable JSON → drop
+    elif isinstance(raw_args, dict):
+        parsed = raw_args
+    else:
+        return None
+
+    # Ensure ID is present; generate one if missing
+    tool_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+
+    return {
+        "id": tool_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(parsed, ensure_ascii=False),
+        },
+    }
+
+
 # ── OpenAI → Anthropic Translation ─────────────────────────────
 
 def _openai_tool_calls_to_anthropic_content(
@@ -177,6 +218,9 @@ def _openai_tool_calls_to_anthropic_content(
 
     OpenAI:  {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{...}"}}
     Anthropic: {"type": "tool_use", "id": "call_1", "name": "bash", "input": {...}}
+
+    Tool calls should be pre-validated via _validate_openai_tool_call for the
+    streaming path; for the non-streaming path, validation happens inline.
     """
     blocks: list[dict[str, Any]] = []
     for tc in tool_calls:
@@ -184,9 +228,8 @@ def _openai_tool_calls_to_anthropic_content(
         raw_args = func.get("arguments", "{}")
         if isinstance(raw_args, str):
             try:
-                import json as _json
-                parsed = _json.loads(raw_args)
-            except _json.JSONDecodeError:
+                parsed = json.loads(raw_args)
+            except json.JSONDecodeError:
                 parsed = raw_args
         else:
             parsed = raw_args
@@ -213,19 +256,25 @@ def openai_response_to_anthropic(
     msg_id = request_id or f"msg_{uuid.uuid4().hex[:12]}"
     content_text = openai_result.get("content", "")
     passthrough_tool_calls = openai_result.get("tool_calls", [])
-    finish_reason = openai_result.get("finish_reason", "end_turn")
+
+    # Validate and filter passthrough tool calls — malformed tool calls
+    # from hallucinating models cause "tool call could not be parsed"
+    # errors in Claude Code.
+    valid_tool_calls = list(
+        filter(None, (_validate_openai_tool_call(tc) for tc in passthrough_tool_calls))
+    )
 
     # Build content blocks
     content_blocks: list[dict[str, Any]] = []
     if content_text:
         content_blocks.append({"type": "text", "text": content_text})
 
-    if passthrough_tool_calls:
+    if valid_tool_calls:
         content_blocks.extend(
-            _openai_tool_calls_to_anthropic_content(passthrough_tool_calls)
+            _openai_tool_calls_to_anthropic_content(valid_tool_calls)
         )
 
-    stop_reason = "tool_use" if passthrough_tool_calls else "end_turn"
+    stop_reason = "tool_use" if valid_tool_calls else "end_turn"
 
     return {
         "id": msg_id,
@@ -250,33 +299,20 @@ async def anthropic_stream_from_openai(
 ) -> str:
     """Convert OpenAI SSE chunks to Anthropic SSE format.
 
-    Anthropic streaming uses:
-      event: message_start
-      data: {"type": "message_start", "message": {...}}
-
-      event: content_block_start
-      data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-
-      event: content_block_delta
-      data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "..."}}
-
-      event: content_block_stop
-      data: {"type": "content_block_stop", "index": 0}
-
-      event: message_delta
-      data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {...}}
-
-      event: message_stop
-      data: {"type": "message_stop"}
+    Handles both text content and tool_use content blocks. Tool calls that
+    appear in delta chunks (from the middleware's passthrough) are captured
+    and emitted as proper Anthropic tool_use content blocks.
     """
     import json as json_mod
 
-    # We need to collect the full content from OpenAI SSE chunks,
-    # then emit Anthropic-format SSE events.
-    content_parts = []
-    finish_reason = None
-    started = False
-    error_message = None
+    content_parts: list[str] = []
+    finish_reason: str | None = None
+    error_message: str | None = None
+    has_msg_start = False
+    text_block_open = False
+    text_block_index = -1   # assigned when text block starts
+    next_block_index = 0
+    pending_tool_calls: list[dict[str, Any]] = []
 
     async for line in stream_generator:
         line = line.strip()
@@ -291,7 +327,6 @@ async def anthropic_stream_from_openai(
             except json_mod.JSONDecodeError:
                 continue
 
-            # Check for error SSE chunks (e.g. tool_loop_exhausted)
             if "error" in chunk:
                 error_message = chunk["error"].get("message", "Unknown error")
                 continue
@@ -303,76 +338,141 @@ async def anthropic_stream_from_openai(
             delta = choices[0].get("delta", {})
             fr = choices[0].get("finish_reason")
 
-            # Extract content
+            # ── Text content ───────────────────────────────────
             content = delta.get("content", "")
             if content:
-                if not started:
-                    # Emit message_start
-                    yield (
-                        "event: message_start\n"
-                        f"data: {json_mod.dumps({'type': 'message_start', 'message': {'id': request_id, 'type': 'message', 'role': 'assistant', 'model': model, 'content': [], 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
-                    )
-                    # Emit content_block_start
-                    yield (
-                        "event: content_block_start\n"
-                        f"data: {json_mod.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-                    )
-                    started = True
-
-                # Emit content_block_delta
-                yield (
-                    "event: content_block_delta\n"
-                    f"data: {json_mod.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': content}})}\n\n"
-                )
+                if not has_msg_start:
+                    has_msg_start = True
+                    yield _sse_evt("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": request_id, "type": "message", "role": "assistant",
+                            "model": model, "content": [],
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    })
+                if not text_block_open:
+                    text_block_open = True
+                    text_block_index = next_block_index
+                    next_block_index += 1
+                    yield _sse_evt("content_block_start", {
+                        "type": "content_block_start",
+                        "index": text_block_index,
+                        "content_block": {"type": "text", "text": ""},
+                    })
+                yield _sse_evt("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": text_block_index,
+                    "delta": {"type": "text_delta", "text": content},
+                })
                 content_parts.append(content)
+
+            # ── Tool calls in delta (passthrough) ──────────────
+            delta_tool_calls = delta.get("tool_calls")
+            if delta_tool_calls:
+                for tc in delta_tool_calls:
+                    validated = _validate_openai_tool_call(tc)
+                    if validated:
+                        pending_tool_calls.append(validated)
 
             if fr is not None:
                 finish_reason = fr
 
-    # Emit closing events
-    if started:
-        yield (
-            "event: content_block_stop\n"
-            f"data: {json_mod.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-        )
+    # ── Emit pending tool_use blocks ──────────────────────────────
+    # These are unrecognised tool calls the middleware passed through
+    # (e.g. a Claude-distilled model hallucinating read/bash/write).
+    for tc in pending_tool_calls:
+        if not has_msg_start:
+            has_msg_start = True
+            yield _sse_evt("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": request_id, "type": "message", "role": "assistant",
+                    "model": model, "content": [],
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            })
+        # Parse arguments for the tool_use input
+        func = tc.get("function", {})
+        raw_args = func.get("arguments", "{}")
+        if isinstance(raw_args, str):
+            try:
+                tool_input = json_mod.loads(raw_args)
+            except json_mod.JSONDecodeError:
+                tool_input = {}
+        else:
+            tool_input = raw_args
 
-        stop_reason = "end_turn" if finish_reason == "stop" else "tool_use"
-        yield (
-            "event: message_delta\n"
-            f"data: {json_mod.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason}, 'usage': {'output_tokens': len(''.join(content_parts).split())}})}\n\n"
-        )
+        block = {
+            "type": "tool_use",
+            "id": tc.get("id", ""),
+            "name": func.get("name", ""),
+            "input": tool_input,
+        }
+        yield _sse_evt("content_block_start", {
+            "type": "content_block_start",
+            "index": next_block_index,
+            "content_block": block,
+        })
+        yield _sse_evt("content_block_stop", {
+            "type": "content_block_stop",
+            "index": next_block_index,
+        })
+        next_block_index += 1
+        finish_reason = "tool_calls"
 
-        yield (
-            "event: message_stop\n"
-            f"data: {json_mod.dumps({'type': 'message_stop'})}\n\n"
-        )
+    # ── Close the text block ──────────────────────────────────────
+    if text_block_open:
+        yield _sse_evt("content_block_stop", {
+            "type": "content_block_stop",
+            "index": text_block_index,
+        })
+
+    # ── Emit closing events ───────────────────────────────────────
+    if has_msg_start:
+        stop_reason = "end_turn" if finish_reason in (None, "stop") else "tool_use"
+        yield _sse_evt("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "usage": {"output_tokens": len("".join(content_parts).split())},
+        })
+        yield _sse_evt("message_stop", {"type": "message_stop"})
     else:
-        # No content was produced — emit the captured error or a generic fallback
+        # No content produced — emit fallback text
         full_text = error_message or (
             "The request completed without producing content. "
             "This may indicate the model did not generate a response."
         )
-        yield (
-            "event: message_start\n"
-            f"data: {json_mod.dumps({'type': 'message_start', 'message': {'id': request_id, 'type': 'message', 'role': 'assistant', 'model': model, 'content': [], 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
-        )
-        yield (
-            "event: content_block_start\n"
-            f"data: {json_mod.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-        )
-        yield (
-            "event: content_block_delta\n"
-            f"data: {json_mod.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': full_text}})}\n\n"
-        )
-        yield (
-            "event: content_block_stop\n"
-            f"data: {json_mod.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-        )
-        yield (
-            "event: message_delta\n"
-            f"data: {json_mod.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 0}})}\n\n"
-        )
-        yield (
-            "event: message_stop\n"
-            f"data: {json_mod.dumps({'type': 'message_stop'})}\n\n"
-        )
+        yield _sse_evt("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": request_id, "type": "message", "role": "assistant",
+                "model": model, "content": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        })
+        yield _sse_evt("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        yield _sse_evt("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": full_text},
+        })
+        yield _sse_evt("content_block_stop", {
+            "type": "content_block_stop",
+            "index": 0,
+        })
+        yield _sse_evt("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 0},
+        })
+        yield _sse_evt("message_stop", {"type": "message_stop"})
+
+
+def _sse_evt(event: str, data: dict[str, Any]) -> str:
+    """Format an Anthropic SSE event."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

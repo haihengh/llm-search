@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Claude Code "tool call could not be parsed" error** — the streaming Anthropic adapter silently dropped `tool_calls` from delta chunks, causing `stop_reason: "tool_use"` with zero tool_use blocks. Fixed by rewriting `anthropic_stream_from_openai` to capture and emit proper `tool_use` content blocks.
+- **Malformed passthrough tool calls** — added `_validate_openai_tool_call()` to filter out hallucinated tool calls with empty names, unparseable JSON, or missing function objects before they reach the client.
+- **Empty tool name passthrough** — `run_tool_loop` and `run_tool_loop_streaming` now drop tool calls with empty names instead of passing them through.
+
 ## [0.2.0] — 2026-07-09
 
 ### Added

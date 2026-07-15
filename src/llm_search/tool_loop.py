@@ -230,9 +230,14 @@ async def run_tool_loop(
             tool_name = tc.get("function", {}).get("name", "")
             if tool_name in TOOL_EXECUTORS:
                 our_tool_calls.append(tc)
-            else:
+            elif tool_name:
                 their_tool_calls.append(tc)
                 logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+            else:
+                logger.warning(
+                    "Dropping malformed tool call with empty name: %s",
+                    json.dumps(tc)[:200],
+                )
 
         # Execute recognised tools and feed results back to conversation
         for tc in our_tool_calls:
@@ -439,9 +444,14 @@ async def run_tool_loop_streaming(
                 tool_name = tc.get("function", {}).get("name", "")
                 if tool_name in TOOL_EXECUTORS:
                     our_tool_calls.append(tc)
-                else:
+                elif tool_name:
                     their_tool_calls.append(tc)
                     logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+                else:
+                    logger.warning(
+                        "Dropping malformed tool call with empty name: %s",
+                        json.dumps(tc)[:200],
+                    )
 
             for tc in our_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
