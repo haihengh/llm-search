@@ -287,8 +287,8 @@ class TestToolLoop:
             assert "calculator" not in tool_names  # Client tools are filtered out
 
     @pytest.mark.asyncio
-    async def test_unrecognized_tool_passthrough(self):
-        """LLM calls an unrecognised tool → loop exits with tool_calls in result."""
+    async def test_unrecognized_tool_blocked_not_passthrough(self):
+        """LLM hallucinates an unrecognised tool → error fed back, loop continues."""
         provider = FakeSearchProvider()
 
         # LLM calls "bash" — not in TOOL_EXECUTORS
@@ -303,10 +303,12 @@ class TestToolLoop:
                 },
             }]
         )
+        # After getting error feedback, LLM produces a real answer
+        call2 = make_mock_lm_response(content="I'll search instead.")
 
         with patch(
             "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(side_effect=[call1]),
+            new=AsyncMock(side_effect=[call1, call2]),
         ):
             result = await run_tool_loop(
                 messages=[{"role": "user", "content": "List files"}],
@@ -315,17 +317,15 @@ class TestToolLoop:
                 lm_studio_url="http://localhost:1234/v1",
             )
 
-        # Should exit with tool_calls for the client to handle
-        assert result["finish_reason"] == "tool_calls"
-        assert len(result["tool_calls"]) == 1
-        assert result["tool_calls"][0]["function"]["name"] == "bash"
-        assert result["content"] == "Let me run a command."
+        # Should NOT passthrough — loop continues and gets a plain answer
+        assert "tool_calls" not in result or not result.get("tool_calls")
+        assert result["content"] == "I'll search instead."
+        assert result["iterations"] == 2  # First blocked, second succeeded
         assert result["searches"] == 0
-        assert result["iterations"] == 1
 
     @pytest.mark.asyncio
-    async def test_mixed_tools_recognized_executed_unrecognized_passthrough(self):
-        """web_search is executed; unrecognised tool is passed through."""
+    async def test_mixed_tools_recognized_executed_unrecognized_blocked(self):
+        """web_search is executed; hallucinated 'bash' is blocked, loop continues."""
         provider = FakeSearchProvider(results=[
             SearchResult("Result", "https://ex.com", "Snippet", 1),
         ])
@@ -346,10 +346,12 @@ class TestToolLoop:
                 },
             ],
         )
+        # After bash is blocked, LLM sees search results and answers
+        call2 = make_mock_lm_response(content="Based on search results: answer.")
 
         with patch(
             "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(side_effect=[call1]),
+            new=AsyncMock(side_effect=[call1, call2]),
         ):
             result = await run_tool_loop(
                 messages=[{"role": "user", "content": "Search and list"}],
@@ -358,11 +360,11 @@ class TestToolLoop:
                 lm_studio_url="http://localhost:1234/v1",
             )
 
-        # web_search was executed, bash was passed through
-        assert result["finish_reason"] == "tool_calls"
+        # web_search was executed, bash was blocked, loop continued
+        assert "tool_calls" not in result or not result.get("tool_calls")
+        assert result["content"] == "Based on search results: answer."
         assert result["searches"] == 1
-        assert len(result["tool_calls"]) == 1
-        assert result["tool_calls"][0]["function"]["name"] == "bash"
+        assert result["iterations"] == 2
         assert len(provider._calls) == 1  # web_search was executed
 
     @pytest.mark.asyncio
@@ -662,12 +664,12 @@ class TestRunToolLoopStreaming:
         assert "data: [DONE]" in events[-1]
 
     @pytest.mark.asyncio
-    async def test_unrecognized_tool_passthrough_streaming(self):
-        """Streaming: unrecognised tool → yields tool_calls SSE chunks and [DONE]."""
+    async def test_unrecognized_tool_blocked_streaming(self):
+        """Streaming: hallucinated tool → error fed to LLM, loop continues to answer."""
         provider = FakeSearchProvider()
 
-        # LLM calls "bash" — unrecognised
-        mock_tool_call = make_mock_lm_response(
+        # LLM hallucinates "bash" — unrecognised
+        call1 = make_mock_lm_response(
             content="Let me check something.",
             tool_calls=[{
                 "id": "call_bash",
@@ -678,39 +680,54 @@ class TestRunToolLoopStreaming:
                 },
             }]
         )
+        # After error feedback, LLM gives a plain answer
+        call2 = make_mock_lm_response(content="I'll use web_search instead.")
+
+        # Streaming chunks for the final answer turn
+        sse_chunks = [
+            make_sse_chunk({"role": "assistant"}),
+            make_sse_chunk({"content": "I'll use web_search instead."}, finish_reason="stop"),
+        ]
 
         with patch(
             "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(return_value=mock_tool_call),
+            new=AsyncMock(side_effect=[call1, call2]),
+        ), patch(
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
         ):
             events = []
             async for sse_str in run_tool_loop_streaming(
                 messages=[{"role": "user", "content": "List files"}],
                 search_provider=provider,
-                chatcmpl_id="test-passthrough",
+                chatcmpl_id="test-blocked",
                 created=5000,
                 model="test-model",
                 lm_studio_url="http://localhost:1234/v1",
             ):
                 events.append(sse_str)
 
-        # Should have content chunk, tool_calls chunk with finish_reason="tool_calls", and [DONE]
+        # Should end normally with [DONE] — no tool_calls passthrough
         assert "data: [DONE]" in events[-1]
 
-        # Find the tool_calls chunk
-        tool_calls_events = [
+        # Should NOT contain any tool_calls delta chunks
+        all_events = [
             json.loads(e[6:].strip())
             for e in events
             if e.startswith("data: ") and e[6:].strip() != "[DONE]"
         ]
-        # At least one chunk should have tool_calls delta
         tool_deltas = [
-            e for e in tool_calls_events
+            e for e in all_events
             if e.get("choices", [{}])[0].get("delta", {}).get("tool_calls")
         ]
-        assert len(tool_deltas) == 1
-        delta_tc = tool_deltas[0]["choices"][0]["delta"]["tool_calls"]
-        assert delta_tc[0]["function"]["name"] == "bash"
+        assert len(tool_deltas) == 0  # No passthrough — hallucinated tools blocked
+
+        # Should contain the final answer
+        content_texts = [
+            e["choices"][0]["delta"].get("content", "")
+            for e in all_events
+        ]
+        assert any("web_search instead" in c for c in content_texts)
 
 
 

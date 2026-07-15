@@ -276,17 +276,33 @@ async def run_tool_loop(
             }
             conversation.append(tool_message)
 
-        # If the LLM called tools we don't recognise, return them to the
-        # client so it can execute them (e.g. Claude Code's Bash / Read).
-        if their_tool_calls:
-            return {
-                "content": content or "",
-                "tool_calls": their_tool_calls,
-                "tool_calls_count": total_tool_calls,
-                "iterations": iteration,
-                "searches": total_searches,
-                "finish_reason": "tool_calls",
+        # Unrecognised tools are almost certainly hallucinations from
+        # Claude-distilled models that know about Bash/Read/Write from
+        # training. Passing them to the client causes "invalid tool
+        # parameters" errors. Instead, feed an error back to the LLM so
+        # it can recover and try a different approach.
+        for tc in their_tool_calls:
+            tool_name = tc.get("function", {}).get("name", "unknown")
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
+                "name": tool_name,
+                "content": (
+                    f"Error: the '{tool_name}' tool is not available. "
+                    "You only have web_search and fetch_page. "
+                    "Please use web_search to find the information you need."
+                ),
             }
+            conversation.append(tool_message)
+            total_tool_calls += 1
+            logger.info(
+                "Blocked hallucinated tool %r — fed error back to LLM", tool_name
+            )
+
+        if their_tool_calls:
+            # Some unrecognised tools were blocked above. Continue the loop
+            # so the LLM can adjust its approach.
+            continue
 
         # Loop continues — LLM sees the search results and responds
 
@@ -485,20 +501,30 @@ async def run_tool_loop_streaming(
                 }
                 conversation.append(tool_message)
 
-            # If the LLM called unrecognised tools, return them to the client
-            # as SSE chunks with finish_reason "tool_calls"
-            if their_tool_calls:
-                # Yield initial role chunk
-                yield _chunk_sse({"role": "assistant"})
-                if content:
-                    yield _chunk_sse({"content": content})
-                # Emit tool calls as a delta so the client can parse them
-                yield _chunk_sse(
-                    {"tool_calls": their_tool_calls},
-                    "tool_calls",
+            # Unrecognised tools = hallucination. Feed error to LLM
+            # instead of passing through to Claude Code (which would
+            # get "invalid tool parameters" since params don't match).
+            for tc in their_tool_calls:
+                tool_name = tc.get("function", {}).get("name", "unknown")
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
+                    "name": tool_name,
+                    "content": (
+                        f"Error: the '{tool_name}' tool is not available. "
+                        "You only have web_search and fetch_page. "
+                        "Please use web_search to find the information you need."
+                    ),
+                }
+                conversation.append(tool_message)
+                total_tool_calls += 1
+                logger.info(
+                    "Blocked hallucinated tool %r — fed error back to LLM", tool_name
                 )
-                yield "data: [DONE]\n\n"
-                return
+
+            if their_tool_calls:
+                # Continue the loop — LLM gets error feedback and retries
+                continue
 
         # Max iterations exceeded — stream accumulated search results
         # as a graceful fallback instead of an error.
