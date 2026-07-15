@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **"invalid tool parameters" error** — removed passthrough of unrecognised tool calls. Claude-distilled models hallucinate Bash/Read/Write calls with wrong parameters. The middleware now feeds an error back to the LLM and continues the loop instead of passing garbage tool calls to Claude Code.
+
 ## [0.2.1] — 2026-07-14
 
 ### Fixed
