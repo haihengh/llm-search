@@ -288,6 +288,8 @@ GitHub Copilot Chat can use the middleware as a custom model provider. Requires 
 
 Set `"id"` to the model ID loaded in LM Studio (or leave `local-model` — LM Studio falls back to the loaded model). "LM Studio + Search" then appears in the Copilot Chat model picker.
 
+**Sizing the token limits** — `maxInputTokens + maxOutputTokens` must fit inside the model's context window, minus headroom for the search results and fetched pages the middleware appends server-side (Copilot doesn't see those, so it can't budget for them). For a 100k-context model, `maxInputTokens: 80000` + `maxOutputTokens: 8192` leaves ~12k of headroom for tool results. Also make sure LM Studio's context length for the loaded model is actually set that high — it defaults to a much smaller value regardless of what the model supports. If you overshoot, the middleware returns a context-overflow error rather than silently truncating.
+
 > BYOK models power **chat only** — inline code completions stay on GitHub's models. Copilot's **agent mode** is not supported: the middleware strips client tools before calling the LLM (see the Claude Code note above), so use ask/chat mode.
 
 ---

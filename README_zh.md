@@ -262,6 +262,8 @@ GitHub Copilot Chat 可以将中间件作为自定义模型服务商使用。需
 
 将 `"id"` 设置为 LM Studio 中加载的模型 ID（或保留 `local-model` — LM Studio 会回退到已加载的模型）。之后 "LM Studio + Search" 就会出现在 Copilot Chat 的模型选择器中。
 
+**如何设置 token 上限** — `maxInputTokens + maxOutputTokens` 必须小于模型的上下文窗口，还要为中间件在服务端追加的搜索结果和网页内容预留空间（Copilot 看不到这些内容，无法为其预算）。以 100k 上下文的模型为例：`maxInputTokens: 80000` + `maxOutputTokens: 8192`，为工具结果留出约 12k 的余量。另外请确认 LM Studio 中加载模型的上下文长度确实设置到了相应大小 — 无论模型支持多少，LM Studio 默认值都小得多。如果超出上限，中间件会返回上下文溢出错误，而不是静默截断。
+
 > BYOK 模型仅用于**聊天** — 内联代码补全仍使用 GitHub 的模型。不支持 Copilot 的 **agent 模式**：中间件在调用 LLM 前会剥离客户端工具（见上文 Claude Code 说明），请使用 ask/chat 模式。
 
 ---
