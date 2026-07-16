@@ -363,6 +363,11 @@ async def messages(request: Request):
     use_stream = body.get("stream", False)
     model = body.get("model", "local-model")
 
+    logger.info(
+        "Anthropic request: model=%r stream=%s messages=%d",
+        model, use_stream, len(openai_req.get("messages", [])),
+    )
+
     try:
         if use_stream:
             # Streaming path — translate OpenAI SSE to Anthropic SSE.

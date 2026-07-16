@@ -535,26 +535,46 @@ async def run_tool_loop_streaming(
 
             # ── No tool calls — answer is complete ──────────────
             if not assembled_tool_calls:
-                if not content_parts and total_searches > 0:
-                    # Model didn't synthesise an answer after searching.
-                    # Stream the raw search results as a graceful fallback
-                    # so the caller sees SOMETHING instead of an empty response.
-                    search_texts: list[str] = []
-                    for msg in conversation:
-                        if msg.get("role") == "tool" and msg.get("name") == WEB_SEARCH:
-                            search_texts.append(msg.get("content", ""))
-                    if search_texts:
-                        fallback = (
-                            "I found the following information:\n\n"
-                            + "\n---\n".join(search_texts)
-                        )
-                        logger.warning(
-                            "Model returned empty text after %d search(es) — "
-                            "falling back to raw search results", total_searches
-                        )
-                        yield _chunk_sse({"content": fallback}, "stop")
+                if not content_parts:
+                    if total_searches > 0:
+                        # Model didn't synthesise an answer after searching.
+                        # Stream the raw search results as a graceful fallback
+                        # so the caller sees SOMETHING instead of an empty response.
+                        search_texts: list[str] = []
+                        for msg in conversation:
+                            if msg.get("role") == "tool" and msg.get("name") == WEB_SEARCH:
+                                search_texts.append(msg.get("content", ""))
+                        if search_texts:
+                            fallback = (
+                                "I found the following information:\n\n"
+                                + "\n---\n".join(search_texts)
+                            )
+                            logger.warning(
+                                "Model returned empty text after %d search(es) — "
+                                "falling back to raw search results", total_searches
+                            )
+                            yield _chunk_sse({"content": fallback}, "stop")
+                        else:
+                            yield _chunk_sse({}, "stop")
                     else:
-                        yield _chunk_sse({}, "stop")
+                        # Completely empty response — no text, no tool calls,
+                        # no prior searches.  Yield a diagnostic message so
+                        # the caller sees something actionable instead of
+                        # "request completed without producing content".
+                        logger.warning(
+                            "Model returned completely empty response "
+                            "(%d chunks, 0 text, 0 tool calls, 0 searches)",
+                            chunk_count,
+                        )
+                        yield _chunk_sse(
+                            {"content": (
+                                "The model returned an empty response. "
+                                "This may indicate the prompt was too long, "
+                                "the model is not loaded, or the model does "
+                                "not support the requested task."
+                            )},
+                            "stop",
+                        )
                 else:
                     yield _chunk_sse({}, "stop")
                 yield "data: [DONE]\n\n"
