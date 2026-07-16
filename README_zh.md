@@ -243,22 +243,26 @@ GitHub Copilot Chat 可以将中间件作为自定义模型服务商使用。需
 > 使用 VS Code Insiders？将路径中的 `Code` 替换为 `Code - Insiders`。
 
 ```json
-{
-  "name": "llm-search",
-  "vendor": "customendpoint",
-  "apiKey": "${input:chat.lm.secret.llmsearch}",
-  "apiType": "chat-completions",
-  "models": [{
-    "id": "local-model",
-    "name": "LM Studio + Search",
-    "url": "http://localhost:8000/v1/chat/completions",
+[
+  {
+    "name": "llm-search",
+    "vendor": "customendpoint",
+    "apiKey": "${input:chat.lm.secret.llmsearch}",
     "apiType": "chat-completions",
-    "toolCalling": true,
-    "maxInputTokens": 32768,
-    "maxOutputTokens": 8192
-  }]
-}
+    "models": [{
+      "id": "local-model",
+      "name": "LM Studio + Search",
+      "url": "http://localhost:8000/v1/chat/completions",
+      "apiType": "chat-completions",
+      "toolCalling": true,
+      "maxInputTokens": 32768,
+      "maxOutputTokens": 8192
+    }]
+  }
+]
 ```
+
+该文件顶层是一个**数组** — 每个服务商组一个条目。编辑后运行 `Developer: Reload Window`，然后在聊天模型选择器的 Manage Models 列表中勾选一次该模型。如果模型仍未出现，可先用方式 A 让 VS Code 自动生成该文件，再对照检查。
 
 将 `"id"` 设置为 LM Studio 中加载的模型 ID（或保留 `local-model` — LM Studio 会回退到已加载的模型）。之后 "LM Studio + Search" 就会出现在 Copilot Chat 的模型选择器中。
 

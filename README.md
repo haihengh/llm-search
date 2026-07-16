@@ -269,22 +269,26 @@ GitHub Copilot Chat can use the middleware as a custom model provider. Requires 
 > Using VS Code Insiders? Replace `Code` with `Code - Insiders` in the path.
 
 ```json
-{
-  "name": "llm-search",
-  "vendor": "customendpoint",
-  "apiKey": "${input:chat.lm.secret.llmsearch}",
-  "apiType": "chat-completions",
-  "models": [{
-    "id": "local-model",
-    "name": "LM Studio + Search",
-    "url": "http://localhost:8000/v1/chat/completions",
+[
+  {
+    "name": "llm-search",
+    "vendor": "customendpoint",
+    "apiKey": "${input:chat.lm.secret.llmsearch}",
     "apiType": "chat-completions",
-    "toolCalling": true,
-    "maxInputTokens": 32768,
-    "maxOutputTokens": 8192
-  }]
-}
+    "models": [{
+      "id": "local-model",
+      "name": "LM Studio + Search",
+      "url": "http://localhost:8000/v1/chat/completions",
+      "apiType": "chat-completions",
+      "toolCalling": true,
+      "maxInputTokens": 32768,
+      "maxOutputTokens": 8192
+    }]
+  }
+]
 ```
+
+The file is a top-level **array** — one entry per provider group. After editing it, run `Developer: Reload Window`, then tick the model once in the chat model picker's Manage Models list. If the model still doesn't appear, use Option A once and let VS Code generate the file, then compare.
 
 Set `"id"` to the model ID loaded in LM Studio (or leave `local-model` — LM Studio falls back to the loaded model). "LM Studio + Search" then appears in the Copilot Chat model picker.
 
