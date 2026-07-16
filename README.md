@@ -223,7 +223,14 @@ Use the MCP server to give Claude Desktop search capability:
 pip install llm-search[mcp]
 ```
 
-**2. Configure Claude Desktop** — add to `claude_desktop_config.json`:
+**2. Configure Claude Desktop** — add to `claude_desktop_config.json` (open it via Claude Desktop → Settings → Developer → Edit Config, or edit directly):
+
+| OS | File location |
+|----|---------------|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
 ```json
 {
   "mcpServers": {
@@ -242,6 +249,46 @@ pip install llm-search[mcp]
 **3. Restart Claude Desktop** — `web_search` and `fetch_page` tools will appear in the tool list.
 
 > The MCP server uses stdio transport. It needs SearXNG running (Docker or standalone) and optionally LM Studio for models that use it. If you only need search tools in Claude Desktop, you don't need LM Studio — just SearXNG.
+
+---
+
+### VS Code Copilot Chat (BYOK)
+
+GitHub Copilot Chat can use the middleware as a custom model provider. Requires VS Code 1.122+ (currently Insiders) and any Copilot subscription (the free plan works).
+
+**Option A — UI:** Command Palette → `Chat: Manage Language Models` → **Add Models** → **Custom Endpoint**, then enter `http://localhost:8000/v1/chat/completions`, API type "Chat Completions", any API key.
+
+**Option B — config file:** create `chatLanguageModels.json` in the VS Code user folder:
+
+| OS | File location |
+|----|---------------|
+| Windows | `%APPDATA%\Code\User\chatLanguageModels.json` |
+| macOS | `~/Library/Application Support/Code/User/chatLanguageModels.json` |
+| Linux | `~/.config/Code/User/chatLanguageModels.json` |
+
+> Using VS Code Insiders? Replace `Code` with `Code - Insiders` in the path.
+
+```json
+{
+  "name": "llm-search",
+  "vendor": "customendpoint",
+  "apiKey": "${input:chat.lm.secret.llmsearch}",
+  "apiType": "chat-completions",
+  "models": [{
+    "id": "local-model",
+    "name": "LM Studio + Search",
+    "url": "http://localhost:8000/v1/chat/completions",
+    "apiType": "chat-completions",
+    "toolCalling": true,
+    "maxInputTokens": 32768,
+    "maxOutputTokens": 8192
+  }]
+}
+```
+
+Set `"id"` to the model ID loaded in LM Studio (or leave `local-model` — LM Studio falls back to the loaded model). "LM Studio + Search" then appears in the Copilot Chat model picker.
+
+> BYOK models power **chat only** — inline code completions stay on GitHub's models. Copilot's **agent mode** is not supported: the middleware strips client tools before calling the LLM (see the Claude Code note above), so use ask/chat mode.
 
 ---
 

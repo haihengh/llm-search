@@ -197,7 +197,14 @@ claude "阅读 Python 3.14 发布说明并总结新特性"
 pip install llm-search[mcp]
 ```
 
-**2. 配置 Claude Desktop** — 添加到 `claude_desktop_config.json`：
+**2. 配置 Claude Desktop** — 添加到 `claude_desktop_config.json`（可通过 Claude Desktop → 设置 → 开发者 → 编辑配置打开，或直接编辑）：
+
+| 操作系统 | 文件位置 |
+|----------|----------|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
 ```json
 {
   "mcpServers": {
@@ -216,6 +223,46 @@ pip install llm-search[mcp]
 **3. 重启 Claude Desktop** — `web_search` 和 `fetch_page` 工具将出现在工具列表中。
 
 > MCP 服务器使用 stdio 传输。需要 SearXNG 运行（Docker 或独立）以及可选的 LM Studio。如果只需要 Claude Desktop 中的搜索工具，不需要 LM Studio — 只需要 SearXNG。
+
+---
+
+### VS Code Copilot Chat（BYOK）
+
+GitHub Copilot Chat 可以将中间件作为自定义模型服务商使用。需要 VS Code 1.122+（目前为 Insiders 版本）以及任意 Copilot 订阅（免费版即可）。
+
+**方式 A — 界面操作：** 命令面板 → `Chat: Manage Language Models` → **Add Models** → **Custom Endpoint**，然后输入 `http://localhost:8000/v1/chat/completions`，API 类型选 "Chat Completions"，API key 随便填。
+
+**方式 B — 配置文件：** 在 VS Code 用户目录下创建 `chatLanguageModels.json`：
+
+| 操作系统 | 文件位置 |
+|----------|----------|
+| Windows | `%APPDATA%\Code\User\chatLanguageModels.json` |
+| macOS | `~/Library/Application Support/Code/User/chatLanguageModels.json` |
+| Linux | `~/.config/Code/User/chatLanguageModels.json` |
+
+> 使用 VS Code Insiders？将路径中的 `Code` 替换为 `Code - Insiders`。
+
+```json
+{
+  "name": "llm-search",
+  "vendor": "customendpoint",
+  "apiKey": "${input:chat.lm.secret.llmsearch}",
+  "apiType": "chat-completions",
+  "models": [{
+    "id": "local-model",
+    "name": "LM Studio + Search",
+    "url": "http://localhost:8000/v1/chat/completions",
+    "apiType": "chat-completions",
+    "toolCalling": true,
+    "maxInputTokens": 32768,
+    "maxOutputTokens": 8192
+  }]
+}
+```
+
+将 `"id"` 设置为 LM Studio 中加载的模型 ID（或保留 `local-model` — LM Studio 会回退到已加载的模型）。之后 "LM Studio + Search" 就会出现在 Copilot Chat 的模型选择器中。
+
+> BYOK 模型仅用于**聊天** — 内联代码补全仍使用 GitHub 的模型。不支持 Copilot 的 **agent 模式**：中间件在调用 LLM 前会剥离客户端工具（见上文 Claude Code 说明），请使用 ask/chat 模式。
 
 ---
 
