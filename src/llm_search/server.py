@@ -28,6 +28,7 @@ from .search.base import SearchProvider
 from .search.brave import BraveSearchProvider
 from .search.searxng import SearXNGSearcher
 from .search.serpapi import SerpAPIProvider
+from . import __version__ as _version
 from .anthropic_adapter import (
     anthropic_request_to_openai,
     anthropic_stream_from_openai,
@@ -36,6 +37,7 @@ from .anthropic_adapter import (
 from .tool_loop import (
     LMStudioError,
     ToolLoopExhaustedError,
+    is_context_overflow,
     run_tool_loop,
     run_tool_loop_streaming,
 )
@@ -84,7 +86,7 @@ async def lifespan(app: FastAPI):
         level=getattr(logging, settings.log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    logger.info("LLM Search v0.1.0 starting")
+    logger.info("LLM Search v%s starting", _version)
     logger.info("LM Studio URL: %s", settings.lm_studio_url)
     logger.info("Search provider: %s", settings.search_provider)
 
@@ -112,7 +114,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LLM Search",
     description="Give your local LLM internet search capability. No API keys, no rate limits.",
-    version="0.1.0",
+    version=_version,
     lifespan=lifespan,
 )
 
@@ -363,24 +365,63 @@ async def messages(request: Request):
 
     try:
         if use_stream:
-            # Streaming path — translate OpenAI SSE to Anthropic SSE
+            # Streaming path — translate OpenAI SSE to Anthropic SSE.
+            #
+            # We peek at the FIRST chunk from the stream *before* wrapping
+            # it in StreamingResponse so that context-overflow errors
+            # (which LM Studio returns as 400s) can be surfaced as proper
+            # HTTP 400 responses.  Claude Code only triggers auto-compaction
+            # on HTTP-level errors, not on in-stream SSE error events.
             chatcmpl_id = f"msg_{uuid.uuid4().hex[:12]}"
             created = int(time.time())
 
-            async def sse_wrapper():
+            tool_loop_gen = run_tool_loop_streaming(
+                messages=openai_req["messages"],
+                search_provider=get_search_provider(),
+                chatcmpl_id=chatcmpl_id,
+                created=created,
+                tools=openai_req["tools"],
+                model=openai_req["model"],
+            )
+            stream_gen = anthropic_stream_from_openai(
+                tool_loop_gen, model=model, request_id=chatcmpl_id,
+            )
+
+            # Grab the first SSE event without sending HTTP headers yet.
+            try:
+                first_chunk: str | None = await stream_gen.__anext__()
+            except StopAsyncIteration:
+                first_chunk = None
+
+            # If the very first event is an error, return it as a plain
+            # HTTP error so Claude Code can react (auto-compact, etc.).
+            if first_chunk and first_chunk.startswith("event: error"):
                 try:
-                    async for chunk in anthropic_stream_from_openai(
-                        run_tool_loop_streaming(
-                            messages=openai_req["messages"],
-                            search_provider=get_search_provider(),
-                            chatcmpl_id=chatcmpl_id,
-                            created=created,
-                            tools=openai_req["tools"],
-                            model=openai_req["model"],
-                        ),
-                        model=model,
-                        request_id=chatcmpl_id,
-                    ):
+                    # Extract the JSON payload from the SSE data line.
+                    data_line = first_chunk.split("\ndata: ")[1].split("\n")[0]
+                    error_data = json.loads(data_line)
+                    error_info = error_data.get("error", {})
+                    error_type: str = error_info.get("type", "api_error")
+                    error_msg: str = error_info.get("message", "Unknown error")
+                except (IndexError, json.JSONDecodeError):
+                    error_type, error_msg = "api_error", "Unknown error"
+
+                status_code = 400 if error_type == "invalid_request_error" else 502
+                return JSONResponse(
+                    status_code=status_code,
+                    content={
+                        "type": "error",
+                        "error": {"type": error_type, "message": error_msg},
+                    },
+                )
+
+            # Normal path — stream the remaining events (first_chunk
+            # prepended so nothing is lost).
+            async def sse_wrapper():
+                if first_chunk is not None:
+                    yield first_chunk
+                try:
+                    async for chunk in stream_gen:
                         yield chunk
                 except Exception:
                     logger.exception("Error in Anthropic streaming")
@@ -411,7 +452,19 @@ async def messages(request: Request):
         return openai_response_to_anthropic(result, model)
 
     except LMStudioError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        # Anthropic-shaped error body so Claude Code can react properly —
+        # a context overflow becomes "prompt is too long", which triggers
+        # Claude Code's auto-compaction instead of an opaque failure.
+        if is_context_overflow(exc):
+            status_code, error_type = 400, "invalid_request_error"
+            message = f"prompt is too long: {exc}"
+        else:
+            status_code, error_type = 502, "api_error"
+            message = str(exc)
+        return JSONResponse(
+            status_code=status_code,
+            content={"type": "error", "error": {"type": error_type, "message": message}},
+        )
     except ToolLoopExhaustedError as exc:
         return openai_response_to_anthropic(
             {"content": str(exc), "tool_calls_count": 0, "iterations": 5, "searches": 0},

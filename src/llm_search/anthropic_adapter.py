@@ -307,7 +307,6 @@ async def anthropic_stream_from_openai(
 
     content_parts: list[str] = []
     finish_reason: str | None = None
-    error_message: str | None = None
     has_msg_start = False
     text_block_open = False
     text_block_index = -1   # assigned when text block starts
@@ -328,8 +327,33 @@ async def anthropic_stream_from_openai(
                 continue
 
             if "error" in chunk:
-                error_message = chunk["error"].get("message", "Unknown error")
-                continue
+                err = chunk["error"]
+                err_type: str = err.get("type", "api_error")
+                err_msg: str = err.get("message", "Unknown error")
+
+                # Map known LM Studio / llama.cpp error patterns to
+                # Anthropic error types so Claude Code can react
+                # appropriately (e.g. auto-compact on prompt-too-long).
+                msg_lower = err_msg.lower()
+                if err_type == "context_overflow" or any(
+                    m in msg_lower
+                    for m in ("n_ctx", "n_keep", "context length", "context_length", "context window")
+                ):
+                    err_type = "invalid_request_error"
+                    err_msg = f"prompt is too long: {err_msg}"
+                elif "not reachable" in msg_lower or "connect" in msg_lower:
+                    err_type = "api_error"
+                elif err_type not in ("invalid_request_error", "authentication_error",
+                                        "permission_error", "not_found_error",
+                                        "rate_limit_error", "api_error",
+                                        "overloaded_error"):
+                    err_type = "api_error"
+
+                yield _sse_evt("error", {
+                    "type": "error",
+                    "error": {"type": err_type, "message": err_msg},
+                })
+                return
 
             choices = chunk.get("choices", [])
             if not choices:
@@ -339,7 +363,7 @@ async def anthropic_stream_from_openai(
             fr = choices[0].get("finish_reason")
 
             # ── Text content ───────────────────────────────────
-            content = delta.get("content", "")
+            content = delta.get("content") or ""
             if content:
                 if not has_msg_start:
                     has_msg_start = True
@@ -348,6 +372,7 @@ async def anthropic_stream_from_openai(
                         "message": {
                             "id": request_id, "type": "message", "role": "assistant",
                             "model": model, "content": [],
+                            "stop_reason": None, "stop_sequence": None,
                             "usage": {"input_tokens": 0, "output_tokens": 0},
                         },
                     })
@@ -389,6 +414,7 @@ async def anthropic_stream_from_openai(
                 "message": {
                     "id": request_id, "type": "message", "role": "assistant",
                     "model": model, "content": [],
+                    "stop_reason": None, "stop_sequence": None,
                     "usage": {"input_tokens": 0, "output_tokens": 0},
                 },
             })
@@ -439,7 +465,7 @@ async def anthropic_stream_from_openai(
         yield _sse_evt("message_stop", {"type": "message_stop"})
     else:
         # No content produced — emit fallback text
-        full_text = error_message or (
+        full_text = (
             "The request completed without producing content. "
             "This may indicate the model did not generate a response."
         )
@@ -448,6 +474,7 @@ async def anthropic_stream_from_openai(
             "message": {
                 "id": request_id, "type": "message", "role": "assistant",
                 "model": model, "content": [],
+                "stop_reason": None, "stop_sequence": None,
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
         })

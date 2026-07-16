@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-07-16
+
+### Fixed
+- **"request completed without producing content" error** — the streaming Anthropic adapter could lose text content when the model's streaming deltas contained tool calls alongside text, triggering the empty-response fallback. Refactored `run_tool_loop_streaming` to a single-pass design: one LM Studio streaming call per iteration that simultaneously relays text and accumulates tool-call fragments.
+- **Context overflow → useless error message** — when the conversation exceeded the model's context window, the 400 error was embedded inside the SSE stream where Claude Code couldn't see it. The middleware now peeks at the first SSE event before committing to `StreamingResponse`; if it's an error, the error is returned as a proper HTTP 400 (`invalid_request_error` / "prompt is too long") which triggers Claude Code's auto-compaction.
+- **Anthropic `message_start` missing fields** — added `stop_reason` and `stop_sequence` fields (both `null`) to all `message_start` SSE events for spec compliance.
+- **Empty final response after searches** — if the model executed searches but then produced an empty text response, the caller saw nothing. The middleware now falls back to streaming the raw search results as the response content.
+
+### Changed
+- **Streaming refactored to single-pass** — the old "non-streaming check + re-generate streaming" approach (two LM Studio calls per iteration) is replaced with one streaming call per iteration. Tool-call fragments are accumulated across chunks and assembled after the stream finishes. Hallucinated client tools (bash, read, write) are blocked server-side with error feedback to the LLM.
+- **`LMStudioError` carries `status_code`** — enables reliable context-overflow detection without fragile string matching.
+- **Version tracking** — `server.py` now reads `__version__` from the package instead of hardcoding `v0.1.0`.
+
 ## [0.2.2] — 2026-07-14
 
 ### Fixed
@@ -77,4 +90,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.1]: https://github.com/haihengh/llm-search/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/haihengh/llm-search/releases/tag/v0.1.0
 [0.2.1]: https://github.com/haihengh/llm-search/compare/v0.2.0...v0.2.1
+[0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2

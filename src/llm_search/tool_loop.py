@@ -7,6 +7,7 @@ back to the LLM, and loops until the LLM produces a plain text answer.
 
 import json
 import logging
+import uuid
 from typing import Any, AsyncGenerator, Optional
 
 import httpx
@@ -31,6 +32,34 @@ class ToolLoopExhaustedError(Exception):
 
 class LMStudioError(Exception):
     """Raised when LM Studio returns an error or is unreachable."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+_CONTEXT_OVERFLOW_MARKERS = (
+    "n_ctx",
+    "n_keep",
+    "context length",
+    "context_length",
+    "context window",
+    "too long",
+)
+
+
+def is_context_overflow(exc: LMStudioError) -> bool:
+    """True when LM Studio rejected the request because the prompt
+    exceeds the loaded model's context window.
+
+    llama.cpp phrases this as e.g. "The number of tokens to keep from
+    the initial prompt is greater than the context length (n_keep: X
+    >= n_ctx: Y)". MLX and other backends use similar wording.
+    """
+    if exc.status_code is not None and exc.status_code != 400:
+        return False
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
 # ── LM Studio Chat Client ─────────────────────────────────────
@@ -64,7 +93,8 @@ async def call_lm_studio(
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
-                f"{exc.response.text[:500]}"
+                f"{exc.response.text[:500]}",
+                status_code=exc.response.status_code,
             )
 
 
@@ -96,7 +126,13 @@ async def call_lm_studio_streaming(
     async with httpx.AsyncClient(timeout=settings.lm_studio_timeout) as client:
         try:
             async with client.stream("POST", url, json=payload) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    raise LMStudioError(
+                        f"LM Studio returned {response.status_code}: "
+                        f"{body.decode(errors='replace')[:500]}",
+                        status_code=response.status_code,
+                    )
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -114,7 +150,8 @@ async def call_lm_studio_streaming(
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
-                f"{exc.response.text[:500]}"
+                f"{exc.response.text[:500]}",
+                status_code=exc.response.status_code,
             )
 
 
@@ -349,19 +386,23 @@ async def run_tool_loop_streaming(
     model: str = "local-model",
     lm_studio_url: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
-    """Execute the tool-call loop with streaming final answer.
+    """Execute the tool-call loop with single-pass streaming on every turn.
 
-    Tool-call turns use non-streaming calls (need full tool_call objects).
-    The final answer turn re-calls LM Studio with stream=True and relays
-    SSE chunks to the caller in OpenAI-compatible format.
+    The LLM is called with stream=True from the first call. Text deltas
+    are relayed live to the caller. Tool-call fragments are accumulated
+    across chunks — if the model finishes with recognized tool calls
+    (web_search / fetch_page), they are executed, results are appended
+    to the conversation, and a new streaming call begins. Hallucinated
+    client tools (bash, read, write, etc.) are blocked server-side with
+    an error fed back to the LLM so it can recover.
+
+    Unlike the old "check + re-generate" approach this issues exactly
+    one LM Studio call per iteration — no second generation that can
+    diverge from the first one.
 
     Yields:
         SSE-formatted strings: ``data: {json}\\n\\n`` per chunk.
         Terminates with ``data: [DONE]\\n\\n``.
-
-    Raises:
-        ToolLoopExhaustedError: Max iterations exceeded (yielded as SSE error)
-        LMStudioError: LM Studio is unreachable (yielded as SSE error)
     """
     url = lm_studio_url or settings.lm_studio_url
     max_iter = settings.max_tool_loop_iterations
@@ -371,6 +412,7 @@ async def run_tool_loop_streaming(
     conversation = list(messages)
     total_searches = 0
     total_tool_calls = 0
+    relayed_text = False  # True once any text content has been sent to caller
 
     def _sse(data: dict[str, Any]) -> str:
         """Format a dict as an SSE data event."""
@@ -409,60 +451,137 @@ async def run_tool_loop_streaming(
                     ),
                 })
 
-            # Always use non-streaming to check for tool calls
-            response = await call_lm_studio(
+            # ── Single-pass streaming call ──────────────────────
+            had_role = False
+            content_parts: list[str] = []
+            tool_fragments: dict[int, dict[str, Any]] = {}
+            chunk_count = 0
+
+            async for chunk in call_lm_studio_streaming(
                 messages=conversation,
                 tools=all_tools,
                 model=model,
                 lm_studio_url=url,
+            ):
+                chunk_count += 1
+                choices = chunk.get("choices", [])
+                if not choices:
+                    logger.debug("Streaming chunk %d: no choices, skipping", chunk_count)
+                    continue
+                delta = choices[0].get("delta", {})
+                finish_reason = choices[0].get("finish_reason")
+
+                # ── Text content — relay immediately ────────────
+                text = delta.get("content") or ""
+                if text:
+                    if not had_role:
+                        had_role = True
+                        if relayed_text:
+                            # Previous iteration already emitted content;
+                            # insert a separator so answers don't run together.
+                            yield _chunk_sse({"content": "\n\n"})
+                        else:
+                            yield _chunk_sse({"role": "assistant"})
+                    content_parts.append(text)
+                    yield _chunk_sse({"content": text})
+
+                # ── Tool-call fragments — accumulate ─────────────
+                delta_tcs = delta.get("tool_calls")
+                if delta_tcs:
+                    for tc in delta_tcs:
+                        idx = tc.get("index", 0)
+                        entry = tool_fragments.setdefault(idx, {})
+                        # ID — first fragment carries it
+                        if "id" in tc and "id" not in entry:
+                            entry["id"] = tc["id"]
+                        # Function name — first fragment carries it
+                        func = tc.get("function", {})
+                        if "name" in func and "function" not in entry:
+                            entry["function"] = {"name": func["name"], "arguments": ""}
+                        # Arguments — concatenate across fragments
+                        if "arguments" in func:
+                            if "function" not in entry:
+                                entry["function"] = {"name": "", "arguments": ""}
+                            entry["function"]["arguments"] += func["arguments"]
+
+                if finish_reason is not None:
+                    break
+
+            logger.info(
+                "Streaming iteration %d done: %d chunks, %d text chars, "
+                "%d tool-call fragments, finish_reason not None",
+                iteration, chunk_count,
+                sum(len(p) for p in content_parts),
+                len(tool_fragments),
             )
 
-            content, tool_calls = extract_assistant_message(response)
+            # ── Assemble accumulated tool calls ─────────────────
+            # Reconstruct full tool-call objects from fragments
+            assembled_tool_calls: list[dict[str, Any]] = []
+            for idx in sorted(tool_fragments):
+                frag = tool_fragments[idx]
+                func = frag.get("function", {})
+                tool_name = func.get("name", "").strip() if isinstance(func, dict) else ""
+                if not tool_name:
+                    continue
+                assembled_tool_calls.append({
+                    "id": frag.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": func.get("arguments", "{}"),
+                    },
+                })
 
-            # ── No tool calls — stream the final answer ──────────
-            if not tool_calls:
-                # Yield initial role chunk
-                yield _chunk_sse({"role": "assistant"})
-
-                # Re-call LM Studio with stream=True for the final answer
-                async for chunk in call_lm_studio_streaming(
-                    messages=conversation,
-                    tools=all_tools,
-                    model=model,
-                    lm_studio_url=url,
-                ):
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    finish_reason = choices[0].get("finish_reason")
-
-                    yield _chunk_sse(delta, finish_reason)
-
-                    if finish_reason is not None:
-                        break
-
+            # ── No tool calls — answer is complete ──────────────
+            if not assembled_tool_calls:
+                if not content_parts and total_searches > 0:
+                    # Model didn't synthesise an answer after searching.
+                    # Stream the raw search results as a graceful fallback
+                    # so the caller sees SOMETHING instead of an empty response.
+                    search_texts: list[str] = []
+                    for msg in conversation:
+                        if msg.get("role") == "tool" and msg.get("name") == WEB_SEARCH:
+                            search_texts.append(msg.get("content", ""))
+                    if search_texts:
+                        fallback = (
+                            "I found the following information:\n\n"
+                            + "\n---\n".join(search_texts)
+                        )
+                        logger.warning(
+                            "Model returned empty text after %d search(es) — "
+                            "falling back to raw search results", total_searches
+                        )
+                        yield _chunk_sse({"content": fallback}, "stop")
+                    else:
+                        yield _chunk_sse({}, "stop")
+                else:
+                    yield _chunk_sse({}, "stop")
                 yield "data: [DONE]\n\n"
                 return
 
-            # ── Tool calls — execute, feed back, loop ────────────
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls,
-            }
-            conversation.append(assistant_message)
+            if content_parts:
+                relayed_text = True
 
-            # Split into recognised (we handle) vs unrecognised (passthrough)
-            our_tool_calls = []
-            their_tool_calls = []
-            for tc in tool_calls:
+            # ── Build assistant message for conversation ────────
+            conversation.append({
+                "role": "assistant",
+                "content": "".join(content_parts) if content_parts else None,
+                "tool_calls": assembled_tool_calls,
+            })
+
+            # Split into recognised (we handle) vs unrecognised (block)
+            our_tool_calls: list[dict[str, Any]] = []
+            their_tool_calls: list[dict[str, Any]] = []
+            for tc in assembled_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
                 if tool_name in TOOL_EXECUTORS:
                     our_tool_calls.append(tc)
                 elif tool_name:
                     their_tool_calls.append(tc)
-                    logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+                    logger.info(
+                        "Unrecognised tool %r — blocked (fed back to LLM)", tool_name
+                    )
                 else:
                     logger.warning(
                         "Dropping malformed tool call with empty name: %s",
@@ -493,20 +612,17 @@ async def run_tool_loop_streaming(
                     search_provider=search_provider,
                 )
 
-                tool_message = {
+                conversation.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
                     "name": tool_name,
                     "content": result_text,
-                }
-                conversation.append(tool_message)
+                })
 
-            # Unrecognised tools = hallucination. Feed error to LLM
-            # instead of passing through to Claude Code (which would
-            # get "invalid tool parameters" since params don't match).
+            # Unrecognised tools = hallucination. Feed error to LLM.
             for tc in their_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")
-                tool_message = {
+                conversation.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
                     "name": tool_name,
@@ -515,8 +631,7 @@ async def run_tool_loop_streaming(
                         "You only have web_search and fetch_page. "
                         "Please use web_search to find the information you need."
                     ),
-                }
-                conversation.append(tool_message)
+                })
                 total_tool_calls += 1
                 logger.info(
                     "Blocked hallucinated tool %r — fed error back to LLM", tool_name
@@ -525,6 +640,8 @@ async def run_tool_loop_streaming(
             if their_tool_calls:
                 # Continue the loop — LLM gets error feedback and retries
                 continue
+
+            # Loop continues — LLM sees search results and responds
 
         # Max iterations exceeded — stream accumulated search results
         # as a graceful fallback instead of an error.
@@ -552,5 +669,6 @@ async def run_tool_loop_streaming(
 
     except LMStudioError as exc:
         logger.error("LM Studio error during streaming: %s", exc)
-        yield _error_sse(str(exc), "lm_studio_error")
+        err_type = "context_overflow" if is_context_overflow(exc) else "lm_studio_error"
+        yield _error_sse(str(exc), err_type)
         yield "data: [DONE]\n\n"
