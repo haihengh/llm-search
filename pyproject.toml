@@ -1,6 +1,6 @@
 [project]
 name = "llm-search"
-version = "0.2.3"
+version = "0.2.4"
 description = "Give your local LLM internet search — no API keys, no rate limits."
 readme = "README.md"
 license = {text = "MIT"}

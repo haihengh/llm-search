@@ -34,6 +34,11 @@ from .anthropic_adapter import (
     anthropic_stream_from_openai,
     openai_response_to_anthropic,
 )
+from .responses_adapter import (
+    openai_result_to_responses,
+    responses_request_to_openai,
+    responses_stream_from_tool_loop,
+)
 from .tool_loop import (
     LMStudioError,
     ToolLoopExhaustedError,
@@ -475,6 +480,130 @@ async def messages(request: Request):
             {"content": str(exc), "tool_calls_count": 0, "iterations": 5, "searches": 0},
             model,
         )
+
+
+
+# ── OpenAI Responses API (Codex / GPT-5.x clients) ────────────────
+
+@app.post("/v1/responses")
+async def responses_api(request: Request):
+    """OpenAI Responses API endpoint for Codex and GPT-5.x clients.
+
+    Translates Responses API format ↔ Chat Completions internally.
+    Supports both streaming and non-streaming.
+    """
+    global _request_count, _total_searches
+
+    client_id = get_client_id(request)
+    if not rate_limiter.is_allowed(client_id):
+        raise HTTPException(status_code=429, detail="Too many requests.")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    _request_count += 1
+
+    # Translate Responses → Chat Completions
+    openai_req = responses_request_to_openai(body)
+    model = body.get("model", "local-model")
+    use_stream = body.get("stream", False)
+
+    logger.info(
+        "Responses request: model=%r messages=%d tools=%d stream=%s",
+        model,
+        len(openai_req.get("messages", [])),
+        len(openai_req.get("tools") or []),
+        use_stream,
+    )
+
+    # ── Streaming path ──────────────────────────────────────────
+    if use_stream:
+        resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+        tool_loop_gen = run_tool_loop_streaming(
+            messages=openai_req["messages"],
+            search_provider=get_search_provider(),
+            chatcmpl_id=chatcmpl_id,
+            created=created,
+            tools=openai_req["tools"],
+            model=openai_req["model"],
+        )
+        stream_gen = responses_stream_from_tool_loop(
+            tool_loop_gen, model=model, resp_id=resp_id,
+        )
+
+        # Peek at the first chunk to catch early errors
+        try:
+            first_chunk: str | None = await stream_gen.__anext__()
+        except StopAsyncIteration:
+            first_chunk = None
+
+        if first_chunk and first_chunk.startswith("event: error"):
+            try:
+                data_line = first_chunk.split("\ndata: ")[1].split("\n")[0]
+                error_data = json.loads(data_line)
+                error_info = error_data.get("error", {})
+                msg = error_info.get("message", "Unknown error")
+            except (IndexError, json.JSONDecodeError):
+                msg = "Unknown error"
+            return JSONResponse(
+                status_code=502,
+                content={"error": {"code": "server_error", "message": msg}},
+            )
+
+        async def sse_wrapper():
+            if first_chunk is not None:
+                yield first_chunk
+            try:
+                async for chunk in stream_gen:
+                    yield chunk
+            except Exception:
+                logger.exception("Error in Responses streaming")
+                yield (
+                    "event: response.completed\n"
+                    f'data: {{"type":"response.completed","response":{{"id":"{resp_id}","object":"response","status":"incomplete","model":"{model}","output":[]}}}}\n\n'
+                )
+
+        return StreamingResponse(
+            sse_wrapper(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── Non-streaming path ──────────────────────────────────────
+    try:
+        result = await run_tool_loop(
+            messages=openai_req["messages"],
+            search_provider=get_search_provider(),
+            tools=openai_req["tools"],
+            model=openai_req["model"],
+        )
+    except LMStudioError as exc:
+        # Responses-shaped error
+        status_code = 400 if is_context_overflow(exc) else 502
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": {
+                    "code": "invalid_request_error" if status_code == 400 else "server_error",
+                    "message": str(exc),
+                }
+            },
+        )
+    except ToolLoopExhaustedError as exc:
+        result = {"content": str(exc), "tool_calls_count": 0, "iterations": 5, "searches": 0}
+
+    _total_searches += result.get("searches", 0)
+
+    return openai_result_to_responses(result, model)
 
 
 @app.get("/v1/models")

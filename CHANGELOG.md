@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-07-20
+
+### Added
+- **OpenAI Responses API endpoint (`POST /v1/responses`)** — the middleware now speaks the Responses API protocol required by Codex Desktop, GPT-5.x, and future OpenAI clients. Includes full streaming SSE support with proper lifecycle events (`response.created` → `output_item.added` → `output_text.delta` → `response.completed`).
+- **Codex Desktop app setup docs** — step-by-step guide for Windows and macOS in both English and Chinese READMEs.
+
+### Fixed
+- **Tool schema sanitization** — Codex sends tool definitions with missing `type: "object"` in parameters schemas. The Responses adapter now normalizes tool schemas before forwarding to LM Studio, preventing 400 errors.
+
 ## [0.2.3] — 2026-07-16
 
 ### Fixed

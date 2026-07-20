@@ -272,6 +272,46 @@ GitHub Copilot Chat 可以将中间件作为自定义模型服务商使用。需
 
 ---
 
+### OpenAI Codex 桌面应用
+
+[Codex 桌面应用](https://openai.com/codex)（Windows / macOS）可以使用中间件作为自定义模型服务商。需要 ChatGPT 账号（免费版即可）和支持自定义 provider 的 Codex 版本。
+
+**步骤 1 — 设置环境变量**（Codex 要求 `env_key`，即使是本地服务商也需要）：
+
+| 操作系统 | 设置方法 |
+|----------|----------|
+| **Windows** | PowerShell 执行 `[System.Environment]::SetEnvironmentVariable('LLM_SEARCH_API_KEY', 'no-key-needed', 'User')`，然后注销重新登录 |
+| **macOS** | `launchctl setenv LLM_SEARCH_API_KEY no-key-needed` 并重启 Codex |
+
+**步骤 2 — 编辑 `~/.codex/config.toml`：**
+
+| 操作系统 | 文件位置 |
+|----------|----------|
+| **Windows** | `C:\Users\<用户名>\.codex\config.toml` |
+| **macOS** | `~/.codex/config.toml` |
+
+```toml
+model = "qwythos-9b-claude-mythos-5-1m"
+model_provider = "llm-search"
+model_context_window = 131072
+model_auto_compact_token_limit = 110000
+model_max_output_tokens = 16384
+
+[model_providers.llm-search]
+name = "LM Studio + Search"
+base_url = "http://localhost:8000/v1"
+env_key = "LLM_SEARCH_API_KEY"
+wire_api = "responses"
+```
+
+将 `model` 设置为 LM Studio 中加载的模型 ID（必须匹配 `/v1/models` 列表中的模型）。编辑后**重启 Codex** — 模型将出现在模型选择器中（由于 Codex Desktop 已知 UI 问题，可能显示为 "Custom"）。
+
+**容量设置** — `model_context_window` 应与加载模型的上下文大小匹配。`model_auto_compact_token_limit` 在约 85% 上下文时触发自动压缩。为中间件服务端追加的搜索结果预留约 12k 的余量。
+
+> **仅支持 chat/ask 模式** — 不支持 agent 模式。中间件在调用 LLM 前会剥离客户端工具（bash、read、write 等），仅保留 `web_search` 和 `fetch_page`。请使用 ask/chat 模式获取搜索增强的回答。
+
+---
+
 ### Cursor / Continue.dev / Windsurf
 
 这些 VS Code AI 扩展支持自定义 OpenAI 兼容服务商：

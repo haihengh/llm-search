@@ -209,10 +209,10 @@ async def run_tool_loop(
     max_iter = settings.max_tool_loop_iterations
 
     # Only pass search tools to the LLM — client tools (bash, read, etc.)
-    # are handled by the client itself (e.g. Claude Code's agentic loop).
-    # Injecting all client tools confuses small local models.
+    # are handled by the client itself (e.g. Codex's agentic loop).
+    # Injecting all client tools overloads small local models and causes
+    # them to produce empty responses (seen with 20+ tool definitions).
     all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
-
     conversation = list(messages)  # Copy — we'll mutate this
     total_searches = 0
     total_tool_calls = 0
@@ -408,6 +408,10 @@ async def run_tool_loop_streaming(
     max_iter = settings.max_tool_loop_iterations
 
     # Only pass search tools to the LLM (see run_tool_loop for rationale)
+    # Only pass search tools to the LLM — client tools (bash, read, etc.)
+    # are handled by the client itself (e.g. Codex's agentic loop).
+    # Injecting all client tools overloads small local models and causes
+    # them to produce empty responses (seen with 20+ tool definitions).
     all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
     conversation = list(messages)
     total_searches = 0

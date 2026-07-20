@@ -298,6 +298,46 @@ Set `"id"` to the model ID loaded in LM Studio (or leave `local-model` — LM St
 
 ---
 
+### OpenAI Codex Desktop App
+
+The [Codex desktop app](https://openai.com/codex) (Windows / macOS) can use the middleware as a custom model provider. Requires a ChatGPT account (free tier works) and Codex version that supports custom providers.
+
+**Step 1 — Set the environment variable** (Codex requires an `env_key` even for local providers):
+
+| OS | How to set |
+|----|------------|
+| **Windows** | `[System.Environment]::SetEnvironmentVariable('LLM_SEARCH_API_KEY', 'no-key-needed', 'User')` in PowerShell, then log out and back in |
+| **macOS** | `launchctl setenv LLM_SEARCH_API_KEY no-key-needed` and restart Codex |
+
+**Step 2 — Edit `~/.codex/config.toml`:**
+
+| OS | File location |
+|----|---------------|
+| **Windows** | `C:\Users\<username>\.codex\config.toml` |
+| **macOS** | `~/.codex/config.toml` |
+
+```toml
+model = "qwythos-9b-claude-mythos-5-1m"
+model_provider = "llm-search"
+model_context_window = 131072
+model_auto_compact_token_limit = 110000
+model_max_output_tokens = 16384
+
+[model_providers.llm-search]
+name = "LM Studio + Search"
+base_url = "http://localhost:8000/v1"
+env_key = "LLM_SEARCH_API_KEY"
+wire_api = "responses"
+```
+
+Set `model` to the model ID loaded in LM Studio (must match a model in the `/v1/models` list). **Restart Codex** after editing — the model appears in the model picker (may show as "Custom" due to a known Codex Desktop UI issue).
+
+**Sizing** — `model_context_window` should match the loaded model's context size. `model_auto_compact_token_limit` triggers auto-compaction at ~85% of context. Leave ~12k headroom for search results the middleware appends server-side.
+
+> **Chat/ask mode only** — agent mode is not supported. The middleware strips client tools (bash, read, write, etc.) before calling the LLM; only `web_search` and `fetch_page` are passed through. Use ask/chat mode for search-augmented answers.
+
+---
+
 ### Cursor / Continue.dev / Windsurf
 
 These VS Code AI extensions support custom OpenAI-compatible providers:
