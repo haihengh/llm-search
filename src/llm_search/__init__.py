@@ -5,4 +5,4 @@ tool-call requests for web_search and executing them against a search
 provider (SearXNG by default — self-hosted, no API keys).
 """
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"

@@ -7,22 +7,22 @@
 [![Docker Image](https://img.shields.io/badge/ghcr.io-haihengh%2Fllm--search-blue)](https://github.com/haihengh/llm-search/pkgs/container/llm-search)
 
 ```
-┌─ Docker（一条命令）────────────────────────────────┐
-│                                                      │
-│  ┌───────────────┐        ┌──────────────────┐      │
-│  │  中间件        │───────▶│    SearXNG       │      │
-│  │  (FastAPI)    │        │  (自托管          │      │
-│  │  :8000        │        │   元搜索引擎)     │      │
-│  └──────┬────────┘        └────────┬─────────┘      │
-│         │                          │                 │
-└─────────┼──────────────────────────┼─────────────────┘
-          │                          │
-          ▼                          ▼ (匿名查询)
-   ┌─────────────┐          ┌──────────────────┐
-   │  LM Studio  │          │  Google, Bing,   │
-   │  :1234      │          │  DuckDuckGo ...  │
-   │  (主机)     │          │  (互联网)        │
-   └─────────────┘          └──────────────────┘
+┌─ Docker（一条命令）─────────────────────────────────────────────┐
+│                                                                   │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐   │
+│  │  聊天界面     │─────▶│   中间件      │─────▶│   SearXNG    │   │
+│  │  (Web UI)    │      │  (FastAPI)   │      │  (自托管      │   │
+│  │  :8080       │      │  :8000       │      │   元搜索引擎) │   │
+│  └──────────────┘      └──────┬───────┘      └──────┬───────┘   │
+│                               │                      │            │
+└───────────────────────────────┼──────────────────────┼────────────┘
+                                │                      │
+                                ▼                      ▼ (匿名查询)
+                         ┌─────────────┐      ┌──────────────────┐
+                         │  LM Studio  │      │  Google, Bing,   │
+                         │  :1234      │      │  DuckDuckGo ...  │
+                         │  (主机)     │      │  (互联网)        │
+                         └─────────────┘      └──────────────────┘
 ```
 
 ## 工作原理
@@ -85,6 +85,24 @@ pip install llm-search
 export SEARXNG_URL=http://localhost:8080
 llm-search
 ```
+
+## 内置聊天界面
+
+项目自带一个轻量级 Web 聊天界面，随中间件一起启动 — 无需额外配置。
+
+```
+http://localhost:8080
+```
+
+**功能：**
+- **流式聊天** — 回复逐 token 实时显示
+- **图片上传** — 从剪贴板粘贴（`Ctrl+V`）或从文件选择；以 OpenAI vision 格式发送
+- **文件上传** — 文本文件（.txt、.py、.md、.json 等）读取后包含在消息中
+- **模型选择器** — 自动从 LM Studio 的 `/v1/models` 获取模型列表
+- **深色模式** — 自动跟随系统偏好
+- **Markdown 渲染** — 代码块、表格、列表与语法高亮
+
+聊天界面通过内部网络代理所有 API 调用到中间件，浏览器只需访问一个地址。它是 `docker-compose.yml` 中的独立 Docker 服务（`chat-client`）— 如果只需要 API，注释掉该服务块即可禁用。
 
 ## 流式输出
 
@@ -368,8 +386,11 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
 
 | 文件 | 用途 |
 |------|---------|
-| `docker-compose.yml` | 一条命令启动 SearXNG + 中间件 |
+| `docker-compose.yml` | 一条命令启动 SearXNG + 中间件 + 聊天界面 |
 | `Dockerfile` | 中间件容器构建 |
+| `chat-client/Dockerfile` | 聊天界面容器构建 |
+| `chat-client/server.py` | FastAPI 代理 — 托管界面并代理 API 调用 |
+| `chat-client/static/` | 聊天界面 — HTML、CSS、原生 JS |
 | `.github/workflows/publish.yml` | 推送 `v*` 标签时发布 Docker 镜像到 GHCR + Docker Hub |
 | `searxng/settings.yml` | SearXNG 配置 — 无需修改 |
 | `src/llm_search/server.py` | FastAPI 服务器 — `/v1/chat/completions`、`/v1/messages`、`/health`、`/stats` |

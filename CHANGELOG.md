@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Built-in chat client** — a lightweight web chat UI (`chat-client/`) that launches alongside the middleware. Features streaming chat, image upload (paste or pick, sent as OpenAI vision-format), file upload (text extraction), model selector, dark mode, and markdown rendering. Accessible at `http://localhost:8080`.
+- **Chat client proxy server** (`chat-client/server.py`) — FastAPI app that serves the static UI and reverse-proxies `/v1/*`, `/health`, `/stats` to the middleware with SSE streaming passthrough.
+
+### Fixed
+- **SSE streaming in chat client proxy** — the `httpx.AsyncClient` was used within `async with`, closing the TCP connection before FastAPI's `StreamingResponse` could read the body. Fixed by keeping the client alive inside the async generator and closing it in `finally` after the stream is exhausted.
+
+### Changed
+- **docker-compose.yml** — now starts three services: `searxng`, `llm-search`, and `chat-client` (optional — comment out to disable).
+
 ## [0.2.4] — 2026-07-20
 
 ### Added

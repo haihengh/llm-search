@@ -9,22 +9,22 @@ One `docker compose up` bundles a self-hosted search engine (SearXNG) with middl
 [![Docker Image](https://img.shields.io/badge/ghcr.io-haihengh%2Fllm--search-blue)](https://github.com/haihengh/llm-search/pkgs/container/llm-search)
 
 ```
-┌─ Docker (one command) ──────────────────────────────┐
-│                                                      │
-│  ┌───────────────┐        ┌──────────────────┐      │
-│  │  Middleware    │───────▶│    SearXNG       │      │
-│  │  (FastAPI)    │        │  (self-hosted    │      │
-│  │  :8000        │        │   metasearch)    │      │
-│  └──────┬────────┘        └────────┬─────────┘      │
-│         │                          │                 │
-└─────────┼──────────────────────────┼─────────────────┘
-          │                          │
-          ▼                          ▼ (anonymized queries)
-   ┌─────────────┐          ┌──────────────────┐
-   │  LM Studio  │          │  Google, Bing,   │
-   │  :1234      │          │  DuckDuckGo ...  │
-   │  (host PC)  │          │  (the internet)  │
-   └─────────────┘          └──────────────────┘
+┌─ Docker (one command) ───────────────────────────────────────────┐
+│                                                                   │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐   │
+│  │  Chat Client │─────▶│  Middleware  │─────▶│   SearXNG    │   │
+│  │  (Web UI)    │      │  (FastAPI)   │      │  (self-hosted │   │
+│  │  :8080       │      │  :8000       │      │   metasearch) │   │
+│  └──────────────┘      └──────┬───────┘      └──────┬───────┘   │
+│                               │                      │            │
+└───────────────────────────────┼──────────────────────┼────────────┘
+                                │                      │
+                                ▼                      ▼ (anonymized queries)
+                         ┌─────────────┐      ┌──────────────────┐
+                         │  LM Studio  │      │  Google, Bing,   │
+                         │  :1234      │      │  DuckDuckGo ...  │
+                         │  (host PC)  │      │  (the internet)  │
+                         └─────────────┘      └──────────────────┘
 ```
 
 ## How it works
@@ -87,6 +87,24 @@ pip install llm-search
 export SEARXNG_URL=http://localhost:8080
 llm-search
 ```
+
+## Built-in Chat Client
+
+The repo includes a lightweight web chat UI that launches alongside the middleware — no extra setup needed.
+
+```
+http://localhost:8080
+```
+
+**Features:**
+- **Streaming chat** — responses appear token-by-token
+- **Image upload** — paste from clipboard (`Ctrl+V`) or pick from file dialog; sent as OpenAI vision-format content
+- **File upload** — text files (.txt, .py, .md, .json, etc.) are read and included in the message
+- **Model selector** — auto-populated from LM Studio's `/v1/models`
+- **Dark mode** — automatic via system preference
+- **Markdown rendering** — code blocks, tables, lists with syntax highlighting
+
+The chat client proxies all API calls to the middleware internally, so the browser only talks to one origin. It's a separate Docker service (`chat-client` in `docker-compose.yml`) — disable it by commenting out the service block if you only need the API.
 
 ## Streaming
 
@@ -394,11 +412,14 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
 
 | What | Purpose |
 |------|---------|
-| `docker-compose.yml` | One command to start SearXNG + middleware |
+| `docker-compose.yml` | One command to start SearXNG + middleware + chat UI |
 | `Dockerfile` | Middleware container build |
+| `chat-client/Dockerfile` | Chat UI container build |
+| `chat-client/server.py` | FastAPI proxy — serves UI, proxies API calls |
+| `chat-client/static/` | Chat UI — HTML, CSS, vanilla JS |
 | `.github/workflows/publish.yml` | Push Docker image to GHCR + Docker Hub on `v*` tags |
 | `searxng/settings.yml` | SearXNG config — no changes needed |
-| `src/llm_search/server.py` | FastAPI server — `/v1/chat/completions`, `/health`, `/stats` |
+| `src/llm_search/server.py` | FastAPI server — `/v1/chat/completions`, `/v1/messages`, `/health`, `/stats` |
 | `src/llm_search/tool_loop.py` | Tool-call intercept loop (non-streaming + streaming) |
 | `src/llm_search/tool_registry.py` | `web_search` + `fetch_page` tool definitions |
 | `src/llm_search/mcp_server.py` | MCP server — expose tools over stdio |

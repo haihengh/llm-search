@@ -12,3 +12,4 @@ tests
 docker-compose.yml
 .pytest_cache
 *.egg-info
+chat-client
