@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-07-21
+
 ### Added
 - **Built-in chat client** — a lightweight web chat UI (`chat-client/`) that launches alongside the middleware. Features streaming chat, image upload (paste or pick, sent as OpenAI vision-format), file upload (text extraction), model selector, dark mode, and markdown rendering. Accessible at `http://localhost:8080`.
 - **Chat client proxy server** (`chat-client/server.py`) — FastAPI app that serves the static UI and reverse-proxies `/v1/*`, `/health`, `/stats` to the middleware with SSE streaming passthrough.
@@ -113,3 +115,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.1]: https://github.com/haihengh/llm-search/compare/v0.2.0...v0.2.1
 [0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2
+[0.2.5]: https://github.com/haihengh/llm-search/compare/v0.2.4...v0.2.5
