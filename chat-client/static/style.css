@@ -59,12 +59,16 @@
 
 html, body {
     height: 100%;
+    width: 100%;
+    overflow-x: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
         Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
     font-size: 15px;
     line-height: 1.5;
     color: var(--text-primary);
     background: var(--bg-primary);
+    /* Prevent iOS rubber-band / overscroll from revealing white */
+    -webkit-overflow-scrolling: touch;
 }
 
 /* ── App Layout ────────────────────────────────────────────────── */
@@ -73,10 +77,17 @@ html, body {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
     max-width: 900px;
     margin: 0 auto;
+    overflow-x: hidden;
     border-left: 1px solid var(--border);
     border-right: 1px solid var(--border);
+    /* Safe area insets for notched phones */
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
 }
 
 /* ── Header ────────────────────────────────────────────────────── */
@@ -147,6 +158,8 @@ html, body {
     overflow-y: auto;
     padding: 20px;
     scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
 }
 
 #chat-container::-webkit-scrollbar {
@@ -229,7 +242,10 @@ html, body {
     border-radius: 16px;
     line-height: 1.6;
     word-wrap: break-word;
-    overflow-wrap: break-word;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    min-width: 0;               /* prevents flex overflow */
+    max-width: 100%;            /* prevent overflow on mobile */
 }
 
 .message.user .message-content {
@@ -309,6 +325,8 @@ html, body {
     margin: 8px 0;
     border-radius: 8px;
     overflow-x: auto;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
 }
 
 .message-content pre code {
@@ -335,6 +353,10 @@ html, body {
     margin: 8px 0;
     font-size: 0.9em;
     width: 100%;
+    max-width: 100%;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 .message-content th, .message-content td {
@@ -437,7 +459,7 @@ html, body {
     background: var(--bg-secondary);
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 14px;
+    font-size: 16px; /* iOS: prevent zoom on focus when font-size < 16px */
     line-height: 1.4;
     resize: none;
     outline: none;
@@ -620,36 +642,186 @@ html, body {
     opacity: 1;
 }
 
+/* ── Install Banner (PWA) ─────────────────────────────────────── */
+
+#install-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.4;
+    animation: fadeIn 0.3s ease;
+    flex-shrink: 0;
+}
+
+#install-banner.hidden {
+    display: none;
+}
+
+#install-banner-icon {
+    font-size: 28px;
+    flex-shrink: 0;
+}
+
+#install-banner-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+#install-banner-title {
+    font-weight: 700;
+    font-size: 14px;
+}
+
+#install-banner-instruction {
+    opacity: 0.9;
+    font-size: 12px;
+}
+
+#install-banner-dismiss {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.25);
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    padding: 0;
+}
+
+#install-banner-dismiss:hover {
+    background: rgba(255,255,255,0.4);
+}
+
 /* ── Responsive ────────────────────────────────────────────────── */
 
-@media (max-width: 600px) {
+/* Tablet and below */
+@media (max-width: 900px) {
     #app {
         max-width: 100%;
-        border: none;
+        border-left: none;
+        border-right: none;
     }
+}
 
+/* Phone — compact layout */
+@media (max-width: 600px) {
     #header {
-        padding: 10px 12px;
+        padding: 8px 12px;
+        gap: 8px;
+        flex-wrap: wrap;
     }
 
     #title {
-        font-size: 15px;
+        font-size: 14px;
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    #header-controls {
+        flex: 0 0 auto;
     }
 
     #model-select {
-        max-width: 140px;
+        max-width: 110px;
         font-size: 12px;
+        padding: 5px 8px;
     }
 
     #chat-container {
-        padding: 12px;
+        padding: 10px;
     }
 
     #input-area {
-        padding: 8px 12px 12px;
+        padding: 8px 10px;
+        padding-bottom: calc(env(safe-area-inset-bottom, 10px) + 12px);
+    }
+
+    #input-row {
+        gap: 6px;
+    }
+
+    /* Larger touch targets on mobile */
+    #attach-btn,
+    #send-btn {
+        width: 44px;
+        height: 44px;
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    #message-input {
+        font-size: 16px; /* Prevent iOS zoom */
+        padding: 10px 12px;
+    }
+
+    /* Messages use more screen width */
+    .message {
+        max-width: 92%;
+    }
+
+    /* Smaller code blocks on mobile */
+    .message-content pre code {
+        font-size: 0.75em;
+        padding: 10px 12px;
+    }
+
+    /* Stack header on very small screens */
+    .welcome-hints {
+        flex-direction: column;
+        gap: 8px;
+        align-items: center;
+    }
+}
+
+/* Tiny phone (iPhone SE, etc.) */
+@media (max-width: 380px) {
+    #title {
+        font-size: 13px;
+    }
+
+    #model-select {
+        max-width: 100px;
+        font-size: 11px;
+    }
+
+    #clear-btn {
+        width: 30px;
+        height: 30px;
     }
 
     .message {
-        max-width: 92%;
+        max-width: 96%;
+    }
+
+    .message-content {
+        padding: 8px 10px;
+        font-size: 14px;
+    }
+
+    .message-role {
+        font-size: 10px;
+    }
+
+    #chat-container {
+        padding: 8px;
+    }
+
+    #input-area {
+        padding: 6px 8px 8px;
     }
 }

@@ -35,6 +35,12 @@ async def index():
     return FileResponse("static/index.html", media_type="text/html")
 
 
+@app.get("/sw.js")
+async def service_worker():
+    """Serve the service worker from root so its scope covers the whole app."""
+    return FileResponse("static/sw.js", media_type="application/javascript")
+
+
 @app.get("/api/health")
 async def chat_health():
     """Chat client health check — also probes the middleware."""

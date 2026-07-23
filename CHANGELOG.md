@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-07-23
+
+### Added
+- **PWA support for the chat client** — the built-in chat UI is now a Progressive Web App. Add it to your phone's home screen (iOS or Android) and it launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.
+- **Mobile Safari bottom URL bar handling** — the chat input area dynamically adjusts its position using the Visual Viewport API so it's never hidden behind Safari's bottom toolbar.
+
+### Fixed
+- **Mobile viewport zoom** — added `maximum-scale=1.0` to the viewport meta tag so iOS doesn't zoom the page on load.
+- **Horizontal overflow on mobile** — long code blocks, tables, and unbroken strings no longer push content outside the display frame. Added `overflow-x: hidden` containment at the document and app level, aggressive word-breaking in message bubbles, and scrollable overflow for tables and pre blocks.
+- **Header wrapping on narrow screens** — the title, model selector, and clear button now wrap gracefully instead of overflowing on phones.
+
 ## [0.2.5] — 2026-07-21
 
 ### Added

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="#1a1a2e"/>
+  <!-- Magnifying glass handle -->
+  <line x1="350" y1="350" x2="420" y2="420" stroke="#4dabf7" stroke-width="32" stroke-linecap="round"/>
+  <!-- Magnifying glass circle -->
+  <circle cx="240" cy="220" r="120" stroke="#4dabf7" stroke-width="28" fill="none"/>
+  <!-- Chat bubble tail -->
+  <path d="M180 340 L140 400 L200 360 Z" fill="#16213e" stroke="#4dabf7" stroke-width="12" stroke-linejoin="round"/>
+  <!-- Chat bubble -->
+  <rect x="120" y="220" width="140" height="100" rx="20" fill="#16213e" stroke="#4dabf7" stroke-width="12"/>
+  <!-- Chat dots -->
+  <circle cx="170" cy="270" r="14" fill="#4dabf7"/>
+  <circle cx="210" cy="270" r="14" fill="#4dabf7"/>
+  <circle cx="240" cy="270" r="14" fill="#4dabf7" opacity="0.3"/>
+</svg>

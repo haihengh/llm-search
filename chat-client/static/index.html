@@ -2,7 +2,19 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+
+    <!-- PWA: iOS -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="LLM Search">
+    <link rel="apple-touch-icon" href="/static/icon.svg">
+
+    <!-- PWA: Android / general -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#1a1a2e">
+    <link rel="manifest" href="/static/manifest.json">
+
     <title>LLM Search Chat</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -21,6 +33,16 @@
 
         <!-- Chat area -->
         <main id="chat-container">
+            <!-- Install banner: shown only on mobile, only when not already in standalone mode -->
+            <div id="install-banner" class="hidden">
+                <div id="install-banner-icon">📱</div>
+                <div id="install-banner-text">
+                    <span id="install-banner-title">Add to Home Screen</span>
+                    <span id="install-banner-instruction"></span>
+                </div>
+                <button id="install-banner-dismiss" title="Dismiss" aria-label="Dismiss">&times;</button>
+            </div>
+
             <div id="messages">
                 <div class="welcome">
                     <p><strong>LLM Search Chat</strong></p>
@@ -72,5 +94,14 @@
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="/static/app.js"></script>
+
+    <!-- Register service worker for PWA installability -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+                .then(() => console.log('PWA: service worker registered'))
+                .catch((err) => console.warn('PWA: service worker failed', err));
+        }
+    </script>
 </body>
 </html>

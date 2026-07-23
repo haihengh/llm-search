@@ -49,6 +49,8 @@ const dom = {
 async function init() {
     configureMarked();
     initEventListeners();
+    initMobileKeyboardHandler();
+    initInstallBanner();
     await loadModels();
     updateSendButton();
     dom.messageInput.focus();
@@ -158,6 +160,9 @@ async function sendMessage() {
 
     if (!text && !hasImage && !hasFile) return;
     if (state.streaming) return;
+
+    // Dismiss mobile keyboard
+    dom.messageInput.blur();
 
     hideError();
 
@@ -571,6 +576,52 @@ function scrollToBottom() {
     });
 }
 
+/**
+ * Handle mobile virtual keyboard and Safari bottom URL bar.
+ *
+ * On iOS Safari, the bottom URL bar overlays page content — it sits *on top*
+ * of the layout viewport rather than shrinking it.  `safe-area-inset-bottom`
+ * only covers the hardware safe area (notch / home indicator), not the bar.
+ *
+ * We use the Visual Viewport API to measure how much of the page is covered
+ * from the bottom and pad the input area accordingly.
+ */
+function initMobileKeyboardHandler() {
+    if (!window.visualViewport) return;
+
+    const inputArea = document.getElementById('input-area');
+    let lastHeight = window.visualViewport.height;
+
+    function adjustForViewport() {
+        const vh = window.visualViewport.height;
+        const offsetTop = window.visualViewport.offsetTop;
+        const layoutHeight = window.innerHeight;
+
+        // How many px are covered at the bottom (Safari toolbar / keyboard accessory bar)
+        const coveredBottom = layoutHeight - (vh + offsetTop);
+
+        if (coveredBottom > 0) {
+            // Pad the input area so it sits above whatever is covering the bottom
+            inputArea.style.paddingBottom = (coveredBottom + 12) + 'px';
+        } else {
+            inputArea.style.paddingBottom = '';
+        }
+
+        // Keyboard opened: viewport shrunk by > 150px → scroll chat to bottom
+        if (lastHeight - vh > 150) {
+            scrollToBottom();
+        }
+
+        lastHeight = vh;
+    }
+
+    window.visualViewport.addEventListener('resize', adjustForViewport);
+    window.visualViewport.addEventListener('scroll', adjustForViewport);
+
+    // Run once on init so the correct padding is applied immediately
+    adjustForViewport();
+}
+
 function showError(message) {
     dom.errorBanner.innerHTML = `
         <span>${escapeHtml(message)}</span>
@@ -611,6 +662,55 @@ function clearConversation() {
     dom.messageInput.style.height = 'auto';
     updateSendButton();
     dom.messageInput.focus();
+}
+
+// ── PWA Install Banner ───────────────────────────────────────────
+
+/**
+ * Show a banner with instructions on how to add the site to the phone's
+ * home screen.  Different instructions for iOS vs Android.
+ *
+ * Suppressed when:
+ *  - Already running in standalone mode (installed)
+ *  - On desktop (no touch support)
+ *  - User dismissed it this session
+ */
+function initInstallBanner() {
+    const banner = document.getElementById('install-banner');
+    const instruction = document.getElementById('install-banner-instruction');
+    const dismissBtn = document.getElementById('install-banner-dismiss');
+
+    if (!banner || !instruction || !dismissBtn) return;
+
+    // Don't show if already installed (standalone mode)
+    if (window.matchMedia('(display-mode: standalone)').matches) return;
+
+    // Only show on touch devices (phones / tablets)
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (!isTouchDevice) return;
+
+    // Don't show if user dismissed it this session
+    if (sessionStorage.getItem('install-banner-dismissed')) return;
+
+    // Detect platform and set appropriate instructions
+    const ua = navigator.userAgent || '';
+    const isIOS = /iphone|ipad|ipod/i.test(ua);
+
+    if (isIOS) {
+        instruction.textContent =
+            'Tap ↑ Share → "Add to Home Screen" to install this app.';
+    } else {
+        instruction.textContent =
+            'Tap ⋮ → "Add to Home Screen" to install this app.';
+    }
+
+    banner.classList.remove('hidden');
+
+    // Dismiss button
+    dismissBtn.addEventListener('click', () => {
+        banner.classList.add('hidden');
+        sessionStorage.setItem('install-banner-dismissed', '1');
+    });
 }
 
 // ── Startup ──────────────────────────────────────────────────────
