@@ -103,8 +103,11 @@ http://localhost:8080
 - **Model selector** — auto-populated from LM Studio's `/v1/models`
 - **Dark mode** — automatic via system preference
 - **Markdown rendering** — code blocks, tables, lists with syntax highlighting
+- **PWA (Progressive Web App)** — installable on iOS and Android home screens, launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.
 
 The chat client proxies all API calls to the middleware internally, so the browser only talks to one origin. It's a separate Docker service (`chat-client` in `docker-compose.yml`) — disable it by commenting out the service block if you only need the API.
+
+> **📱 Mobile access:** The chat client is accessible from any device on your local network. Find your computer's IP (`ipconfig` on Windows, `ifconfig` on macOS/Linux) and open `http://<your-ip>:8080` on your phone. On iOS Safari, tap Share → "Add to Home Screen". On Android Chrome, tap ⋮ → "Add to Home Screen". The app launches fullscreen with its own icon.
 
 ## Streaming
 

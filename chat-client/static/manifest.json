@@ -10,9 +10,9 @@
   "background_color": "#1a1a2e",
   "icons": [
     {
-      "src": "/static/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

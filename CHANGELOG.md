@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.6] — 2026-07-23
 
 ### Added
-- **PWA support for the chat client** — the built-in chat UI is now a Progressive Web App. Add it to your phone's home screen (iOS or Android) and it launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.
+- **PWA support for the chat client** — the built-in chat UI is now a Progressive Web App with a custom app icon. Add it to your phone's home screen (iOS or Android) and it launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.
 - **Mobile Safari bottom URL bar handling** — the chat input area dynamically adjusts its position using the Visual Viewport API so it's never hidden behind Safari's bottom toolbar.
 
 ### Fixed
