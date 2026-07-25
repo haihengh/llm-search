@@ -91,6 +91,12 @@ async def call_lm_studio(
             return response.json()
         except httpx.ConnectError:
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
+        except httpx.TimeoutException:
+            raise LMStudioError(
+                f"LM Studio request timed out after {settings.lm_studio_timeout}s "
+                f"(model may be slow with many tools — try increasing "
+                f"LM_STUDIO_TIMEOUT or reducing the number of client tools)"
+            )
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
@@ -148,6 +154,12 @@ async def call_lm_studio_streaming(
                             logger.debug("Skipping unparseable SSE line: %s", line[:100])
         except httpx.ConnectError:
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
+        except httpx.TimeoutException:
+            raise LMStudioError(
+                f"LM Studio streaming request timed out after "
+                f"{settings.lm_studio_timeout}s per read — the model may be "
+                f"generating too slowly or hung"
+            )
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
@@ -734,9 +746,14 @@ async def run_tool_loop_streaming(
                 # Emit role preamble if not already sent in this iteration
                 if not had_role:
                     yield _chunk_sse({"role": "assistant"})
-                # Emit each client tool call as a delta chunk
-                for tc in passthrough_tool_calls:
-                    yield _chunk_sse({"tool_calls": [tc]}, "tool_use")
+                # Emit each client tool call as a delta chunk. Only the
+                # last chunk carries finish_reason per OpenAI SSE spec.
+                for i, tc in enumerate(passthrough_tool_calls):
+                    is_last = (i == len(passthrough_tool_calls) - 1)
+                    yield _chunk_sse(
+                        {"tool_calls": [tc]},
+                        "tool_use" if is_last else None,
+                    )
                 yield "data: [DONE]\n\n"
                 return
 
