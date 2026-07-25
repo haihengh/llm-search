@@ -265,8 +265,13 @@ class TestToolLoop:
         assert provider._calls[0] == ("object args", 3)
 
     @pytest.mark.asyncio
-    async def test_only_search_tools_sent_to_llm(self):
-        """Only web_search and fetch_page are sent to LM Studio, not client tools."""
+    async def test_client_tools_sent_to_llm_alongside_search(self):
+        """Client tools are now sent to LM Studio alongside search tools.
+
+        The LLM sees all available tools — both the client's tools and
+        the auto-injected web_search + fetch_page. This preserves the
+        local LLM's existing capabilities while adding search on top.
+        """
         provider = FakeSearchProvider(results=[])
         mock_response = make_mock_lm_response(content="Done.")
 
@@ -278,20 +283,18 @@ class TestToolLoop:
                 model="test-model",
             )
 
-            # Only search tools are forwarded to LM Studio — client tools
-            # (like calculator, bash, read) are handled by the client itself.
             tools_sent = mock_call.call_args.kwargs["tools"]
             tool_names = [t["function"]["name"] for t in tools_sent]
             assert "web_search" in tool_names
             assert "fetch_page" in tool_names
-            assert "calculator" not in tool_names  # Client tools are filtered out
+            assert "calculator" in tool_names  # Client tools are now included
 
     @pytest.mark.asyncio
-    async def test_unrecognized_tool_blocked_not_passthrough(self):
-        """LLM hallucinates an unrecognised tool → error fed back, loop continues."""
+    async def test_hallucinated_tool_blocked_not_passthrough(self):
+        """LLM hallucinates a tool NOT in client tools → error fed back, loop continues."""
         provider = FakeSearchProvider()
 
-        # LLM calls "bash" — not in TOOL_EXECUTORS
+        # LLM calls "bash" — not in TOOL_EXECUTORS and not in client tools
         call1 = make_mock_lm_response(
             content="Let me run a command.",
             tool_calls=[{
@@ -324,13 +327,14 @@ class TestToolLoop:
         assert result["searches"] == 0
 
     @pytest.mark.asyncio
-    async def test_mixed_tools_recognized_executed_unrecognized_blocked(self):
-        """web_search is executed; hallucinated 'bash' is blocked, loop continues."""
+    async def test_mixed_search_executed_hallucination_blocked(self):
+        """web_search is executed; hallucinated 'bash' (not in client tools) is blocked."""
         provider = FakeSearchProvider(results=[
             SearchResult("Result", "https://ex.com", "Snippet", 1),
         ])
 
         # LLM calls web_search AND "bash" in the same response
+        # "bash" is NOT in client tools → hallucination
         call1 = make_mock_lm_response(
             content="Searching and then running a command...",
             tool_calls=[
@@ -396,6 +400,170 @@ class TestToolLoop:
         assert "tool_calls" not in result or result.get("tool_calls") is None
         assert result["content"] == "Final answer."
         assert result["searches"] == 1
+        assert result["iterations"] == 2
+
+    # ── Client tool passthrough tests ──────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_client_tool_passthrough(self):
+        """LLM calls a client-provided tool → loop stops and returns it for passthrough."""
+        provider = FakeSearchProvider()
+
+        # LLM calls "read_file" — it IS in the client's tools list
+        call1 = make_mock_lm_response(
+            content="Let me read that file.",
+            tool_calls=[{
+                "id": "call_read",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path": "/tmp/test.txt"}',
+                },
+            }]
+        )
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=call1),
+        ):
+            result = await run_tool_loop(
+                messages=[{"role": "user", "content": "Read /tmp/test.txt"}],
+                search_provider=provider,
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            )
+
+        # Should return the tool call for passthrough — NOT block it
+        assert result.get("tool_calls") is not None
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["function"]["name"] == "read_file"
+        assert result["finish_reason"] == "tool_use"
+        assert result["content"] == "Let me read that file."
+        assert result["searches"] == 0
+        assert result["iterations"] == 1
+
+    @pytest.mark.asyncio
+    async def test_mixed_search_executed_client_tool_passthrough(self):
+        """web_search is executed; client tool is returned for passthrough."""
+        provider = FakeSearchProvider(results=[
+            SearchResult("Result", "https://ex.com", "Snippet", 1),
+        ])
+
+        # LLM calls web_search AND "read_file" (a client-provided tool)
+        call1 = make_mock_lm_response(
+            content="Searching and reading...",
+            tool_calls=[
+                {
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": '{"query": "test"}'},
+                },
+                {
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "/tmp/x.txt"}'},
+                },
+            ],
+        )
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=call1),
+        ):
+            result = await run_tool_loop(
+                messages=[{"role": "user", "content": "Search and read"}],
+                search_provider=provider,
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            )
+
+        # web_search was executed (server-side), read_file is passthrough
+        assert result.get("tool_calls") is not None
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["function"]["name"] == "read_file"
+        assert result["finish_reason"] == "tool_use"
+        assert result["searches"] == 1
+        assert len(provider._calls) == 1  # web_search was executed
+
+    @pytest.mark.asyncio
+    async def test_multiple_client_tools_all_passthrough(self):
+        """LLM calls multiple client tools — all returned for passthrough."""
+        provider = FakeSearchProvider()
+
+        call1 = make_mock_lm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "/a.txt"}'},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                },
+            ],
+        )
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=call1),
+        ):
+            result = await run_tool_loop(
+                messages=[{"role": "user", "content": "Read and list"}],
+                search_provider=provider,
+                tools=[
+                    {"type": "function", "function": {"name": "read_file"}},
+                    {"type": "function", "function": {"name": "bash"}},
+                ],
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            )
+
+        assert result.get("tool_calls") is not None
+        assert len(result["tool_calls"]) == 2
+        names = [tc["function"]["name"] for tc in result["tool_calls"]]
+        assert "read_file" in names
+        assert "bash" in names
+        assert result["finish_reason"] == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_hallucination_blocked_even_with_client_tools(self):
+        """Tools NOT in client list are still blocked, even when client provides other tools."""
+        provider = FakeSearchProvider()
+
+        # LLM calls "write_file" — NOT in TOOL_EXECUTORS and NOT in client tools
+        # (client only provides "read_file")
+        call1 = make_mock_lm_response(
+            tool_calls=[{
+                "id": "call_write",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": '{"path": "/tmp/out.txt", "content": "test"}',
+                },
+            }]
+        )
+        call2 = make_mock_lm_response(content="I'll use the available tools instead.")
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(side_effect=[call1, call2]),
+        ):
+            result = await run_tool_loop(
+                messages=[{"role": "user", "content": "Write a file"}],
+                search_provider=provider,
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            )
+
+        # Hallucinated "write_file" was blocked — loop continued to plain answer
+        assert "tool_calls" not in result or not result.get("tool_calls")
+        assert result["content"] == "I'll use the available tools instead."
         assert result["iterations"] == 2
 
 
@@ -664,11 +832,11 @@ class TestRunToolLoopStreaming:
         assert "data: [DONE]" in events[-1]
 
     @pytest.mark.asyncio
-    async def test_unrecognized_tool_blocked_streaming(self):
-        """Streaming: hallucinated tool → error fed to LLM, loop continues to answer."""
+    async def test_hallucinated_tool_blocked_streaming(self):
+        """Streaming: hallucinated tool (not in client tools) → error fed to LLM, loop continues."""
         provider = FakeSearchProvider()
 
-        # LLM hallucinates "bash" — unrecognised
+        # LLM hallucinates "bash" — not in TOOL_EXECUTORS, no client tools provided
         call1 = make_mock_lm_response(
             content="Let me check something.",
             tool_calls=[{
@@ -728,6 +896,60 @@ class TestRunToolLoopStreaming:
             for e in all_events
         ]
         assert any("web_search instead" in c for c in content_texts)
+
+    # ── Client tool passthrough (streaming) ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_client_tool_passthrough_streaming(self):
+        """Streaming: LLM calls client-provided tool → emitted as SSE delta, stream ends."""
+        provider = FakeSearchProvider()
+
+        # LLM calls "read_file" — it IS in client tools
+        call1 = make_mock_lm_response(
+            content="Let me read that file.",
+            tool_calls=[{
+                "id": "call_read",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path": "/tmp/test.txt"}',
+                },
+            }]
+        )
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=call1),
+        ):
+            events = []
+            async for sse_str in run_tool_loop_streaming(
+                messages=[{"role": "user", "content": "Read /tmp/test.txt"}],
+                search_provider=provider,
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+                chatcmpl_id="test-passthrough",
+                created=6000,
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            ):
+                events.append(sse_str)
+
+        # Should contain [DONE]
+        assert "data: [DONE]" in events[-1]
+
+        # Should contain tool_calls delta chunks
+        all_events = [
+            json.loads(e[6:].strip())
+            for e in events
+            if e.startswith("data: ") and e[6:].strip() != "[DONE]"
+        ]
+        tool_deltas = [
+            e for e in all_events
+            if e.get("choices", [{}])[0].get("delta", {}).get("tool_calls")
+        ]
+        assert len(tool_deltas) == 1  # One passthrough tool call
+        tc = tool_deltas[0]["choices"][0]["delta"]["tool_calls"][0]
+        assert tc["function"]["name"] == "read_file"
+        assert tool_deltas[0]["choices"][0]["finish_reason"] == "tool_use"
 
 
 

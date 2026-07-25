@@ -21,6 +21,7 @@ from .tool_registry import (
     WEB_SEARCH,
     WEB_SEARCH_TOOL,
     dispatch_tool,
+    inject_tools,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,19 +188,23 @@ async def run_tool_loop(
 ) -> dict[str, Any]:
     """Execute the tool-call intercept loop.
 
-    1. Send messages + tools to LM Studio
-    2. If LLM calls web_search → execute, feed back, repeat
-    3. Return the final assistant message as an OpenAI-format dict
+    1. Send messages + all tools (client tools + search tools) to LM Studio
+    2. If LLM calls web_search / fetch_page → execute, feed back, repeat
+    3. If LLM calls a client-provided tool → return it as passthrough
+    4. If LLM hallucinates an unknown tool → feed error, let it recover
+    5. Return the final assistant message as an OpenAI-format dict
 
     Args:
         messages: Chat messages (OpenAI format)
         search_provider: Where to execute searches
-        tools: Optional client-provided tools (web_search is auto-injected)
+        tools: Optional client-provided tools (web_search + fetch_page
+               are auto-injected alongside them)
         model: Model name to pass to LM Studio
         lm_studio_url: URL of the LM Studio API
 
     Returns:
-        Dict with keys: content, tool_calls_count, iterations, searches
+        Dict with keys: content, tool_calls (passthrough), tool_calls_count,
+        iterations, searches, finish_reason
 
     Raises:
         ToolLoopExhaustedError: Max iterations exceeded
@@ -208,11 +213,21 @@ async def run_tool_loop(
     url = lm_studio_url or settings.lm_studio_url
     max_iter = settings.max_tool_loop_iterations
 
-    # Only pass search tools to the LLM — client tools (bash, read, etc.)
-    # are handled by the client itself (e.g. Codex's agentic loop).
-    # Injecting all client tools overloads small local models and causes
-    # them to produce empty responses (seen with 20+ tool definitions).
-    all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
+    # Merge client-provided tools with auto-injected search tools.
+    # The LLM sees everything: client tools (bash, read, etc.) +
+    # web_search + fetch_page. This preserves the local LLM's existing
+    # capabilities while adding search on top.
+    all_tools = inject_tools(tools)
+    # Build a set of client tool names for distinguishing genuine
+    # passthrough tools from model hallucinations.
+    client_tool_names: set[str] = set()
+    if tools:
+        for t in tools:
+            func = t.get("function") if isinstance(t, dict) else None
+            if isinstance(func, dict):
+                name = func.get("name", "")
+                if name:
+                    client_tool_names.add(name)
     conversation = list(messages)  # Copy — we'll mutate this
     total_searches = 0
     total_tool_calls = 0
@@ -260,24 +275,31 @@ async def run_tool_loop(
         }
         conversation.append(assistant_message)
 
-        # Split tool calls: recognised (we handle) vs unrecognised (passthrough to client)
-        our_tool_calls = []
-        their_tool_calls = []
+        # Three-way classification:
+        #   search tools  → execute server-side, feed result, continue loop
+        #   client tools  → passthrough to caller for execution
+        #   hallucinations → names match nothing — feed error, let LLM recover
+        search_tool_calls = []
+        passthrough_tool_calls = []
+        hallucinated_tool_calls = []
         for tc in tool_calls:
             tool_name = tc.get("function", {}).get("name", "")
             if tool_name in TOOL_EXECUTORS:
-                our_tool_calls.append(tc)
+                search_tool_calls.append(tc)
+            elif tool_name in client_tool_names:
+                passthrough_tool_calls.append(tc)
+                logger.info("Client tool %r — will passthrough to caller", tool_name)
             elif tool_name:
-                their_tool_calls.append(tc)
-                logger.info("Unrecognised tool %r — will passthrough to client", tool_name)
+                hallucinated_tool_calls.append(tc)
+                logger.info("Hallucinated tool %r — will block", tool_name)
             else:
                 logger.warning(
                     "Dropping malformed tool call with empty name: %s",
                     json.dumps(tc)[:200],
                 )
 
-        # Execute recognised tools and feed results back to conversation
-        for tc in our_tool_calls:
+        # Execute search tools and feed results back to conversation
+        for tc in search_tool_calls:
             tool_name = tc.get("function", {}).get("name", "")
 
             # Parse arguments
@@ -313,12 +335,10 @@ async def run_tool_loop(
             }
             conversation.append(tool_message)
 
-        # Unrecognised tools are almost certainly hallucinations from
-        # Claude-distilled models that know about Bash/Read/Write from
-        # training. Passing them to the client causes "invalid tool
-        # parameters" errors. Instead, feed an error back to the LLM so
-        # it can recover and try a different approach.
-        for tc in their_tool_calls:
+        # Hallucinated tools — names the model invented that match
+        # neither our search tools nor the client's tools. Feed an error
+        # back to the LLM so it can recover and try a different approach.
+        for tc in hallucinated_tool_calls:
             tool_name = tc.get("function", {}).get("name", "unknown")
             tool_message = {
                 "role": "tool",
@@ -336,10 +356,28 @@ async def run_tool_loop(
                 "Blocked hallucinated tool %r — fed error back to LLM", tool_name
             )
 
-        if their_tool_calls:
-            # Some unrecognised tools were blocked above. Continue the loop
-            # so the LLM can adjust its approach.
+        if hallucinated_tool_calls:
+            # Some tools were hallucinations. Continue the loop so the
+            # LLM can adjust its approach.
             continue
+
+        # Client tools — the LLM called a tool the client provided.
+        # Stop the loop and return the tool calls for the client to
+        # execute (e.g. Claude Code's bash, read, write).
+        if passthrough_tool_calls:
+            logger.info(
+                "Passthrough %d client tool(s) to caller: %s",
+                len(passthrough_tool_calls),
+                [tc.get("function", {}).get("name") for tc in passthrough_tool_calls],
+            )
+            return {
+                "content": content or "",
+                "tool_calls": passthrough_tool_calls,
+                "tool_calls_count": total_tool_calls,
+                "iterations": iteration,
+                "searches": total_searches,
+                "finish_reason": "tool_use",
+            }
 
         # Loop continues — LLM sees the search results and responds
 
@@ -390,11 +428,11 @@ async def run_tool_loop_streaming(
 
     The LLM is called with stream=True from the first call. Text deltas
     are relayed live to the caller. Tool-call fragments are accumulated
-    across chunks — if the model finishes with recognized tool calls
-    (web_search / fetch_page), they are executed, results are appended
-    to the conversation, and a new streaming call begins. Hallucinated
-    client tools (bash, read, write, etc.) are blocked server-side with
-    an error fed back to the LLM so it can recover.
+    across chunks — search tools (web_search / fetch_page) are executed
+    server-side, results are appended to the conversation, and a new
+    streaming call begins. Client-provided tools are emitted as SSE delta
+    chunks for passthrough to the caller. Hallucinated tools are blocked
+    with an error fed back to the LLM so it can recover.
 
     Unlike the old "check + re-generate" approach this issues exactly
     one LM Studio call per iteration — no second generation that can
@@ -407,12 +445,19 @@ async def run_tool_loop_streaming(
     url = lm_studio_url or settings.lm_studio_url
     max_iter = settings.max_tool_loop_iterations
 
-    # Only pass search tools to the LLM (see run_tool_loop for rationale)
-    # Only pass search tools to the LLM — client tools (bash, read, etc.)
-    # are handled by the client itself (e.g. Codex's agentic loop).
-    # Injecting all client tools overloads small local models and causes
-    # them to produce empty responses (seen with 20+ tool definitions).
-    all_tools = [WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
+    # Merge client-provided tools with auto-injected search tools.
+    # The LLM sees everything: client tools + web_search + fetch_page.
+    all_tools = inject_tools(tools)
+    # Build a set of client tool names for distinguishing genuine
+    # passthrough tools from model hallucinations.
+    client_tool_names: set[str] = set()
+    if tools:
+        for t in tools:
+            func = t.get("function") if isinstance(t, dict) else None
+            if isinstance(func, dict):
+                name = func.get("name", "")
+                if name:
+                    client_tool_names.add(name)
     conversation = list(messages)
     total_searches = 0
     total_tool_calls = 0
@@ -594,17 +639,26 @@ async def run_tool_loop_streaming(
                 "tool_calls": assembled_tool_calls,
             })
 
-            # Split into recognised (we handle) vs unrecognised (block)
-            our_tool_calls: list[dict[str, Any]] = []
-            their_tool_calls: list[dict[str, Any]] = []
+            # Three-way classification:
+            #   search tools  → execute server-side, feed result, continue
+            #   client tools  → passthrough to caller via SSE delta chunks
+            #   hallucinations → feed error back to LLM, let it recover
+            search_tool_calls: list[dict[str, Any]] = []
+            passthrough_tool_calls: list[dict[str, Any]] = []
+            hallucinated_tool_calls: list[dict[str, Any]] = []
             for tc in assembled_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
                 if tool_name in TOOL_EXECUTORS:
-                    our_tool_calls.append(tc)
-                elif tool_name:
-                    their_tool_calls.append(tc)
+                    search_tool_calls.append(tc)
+                elif tool_name in client_tool_names:
+                    passthrough_tool_calls.append(tc)
                     logger.info(
-                        "Unrecognised tool %r — blocked (fed back to LLM)", tool_name
+                        "Client tool %r — will passthrough to caller", tool_name
+                    )
+                elif tool_name:
+                    hallucinated_tool_calls.append(tc)
+                    logger.info(
+                        "Hallucinated tool %r — will block", tool_name
                     )
                 else:
                     logger.warning(
@@ -612,7 +666,8 @@ async def run_tool_loop_streaming(
                         json.dumps(tc)[:200],
                     )
 
-            for tc in our_tool_calls:
+            # Execute search tools and feed results back to conversation
+            for tc in search_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "")
 
                 try:
@@ -643,8 +698,9 @@ async def run_tool_loop_streaming(
                     "content": result_text,
                 })
 
-            # Unrecognised tools = hallucination. Feed error to LLM.
-            for tc in their_tool_calls:
+            # Hallucinated tools — names the model invented. Feed error
+            # back to the LLM so it can recover and try a different approach.
+            for tc in hallucinated_tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")
                 conversation.append({
                     "role": "tool",
@@ -661,9 +717,28 @@ async def run_tool_loop_streaming(
                     "Blocked hallucinated tool %r — fed error back to LLM", tool_name
                 )
 
-            if their_tool_calls:
+            if hallucinated_tool_calls:
                 # Continue the loop — LLM gets error feedback and retries
                 continue
+
+            # Client tools — the LLM called a tool the client provided.
+            # Emit as SSE delta chunks so the adapters capture them,
+            # then stop the stream. The client will execute the tools
+            # and make another request.
+            if passthrough_tool_calls:
+                logger.info(
+                    "Passthrough %d client tool(s) to caller: %s",
+                    len(passthrough_tool_calls),
+                    [tc.get("function", {}).get("name") for tc in passthrough_tool_calls],
+                )
+                # Emit role preamble if not already sent in this iteration
+                if not had_role:
+                    yield _chunk_sse({"role": "assistant"})
+                # Emit each client tool call as a delta chunk
+                for tc in passthrough_tool_calls:
+                    yield _chunk_sse({"tool_calls": [tc]}, "tool_use")
+                yield "data: [DONE]\n\n"
+                return
 
             # Loop continues — LLM sees search results and responds
 

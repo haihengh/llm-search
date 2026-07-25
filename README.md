@@ -30,7 +30,7 @@ One `docker compose up` bundles a self-hosted search engine (SearXNG) with middl
 ## How it works
 
 1. Your chat client sends a request to `localhost:8000` (the middleware)
-2. The middleware forwards it to LM Studio with `web_search` and `fetch_page` tools auto-injected
+2. The middleware forwards it to LM Studio with `web_search` + `fetch_page` auto-injected alongside the client's own tools
 3. When the LLM decides to search, the middleware intercepts the tool call
 4. Search goes to **SearXNG** (running in Docker, no API key needed)
 5. SearXNG queries Google/Bing/DuckDuckGo anonymously and returns results
@@ -125,12 +125,13 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
 
 ## Tools
 
-The middleware auto-injects two tools — no client configuration needed:
+The middleware auto-injects two search tools. Any tools your client already has (Bash, Read, Write, etc.) are passed through — the LLM sees everything:
 
 | Tool | What it does |
 |------|-------------|
-| `web_search` | Search the internet for current information |
-| `fetch_page` | Fetch and read the full text of a web page |
+| `web_search` | Search the internet for current information (executed server-side) |
+| `fetch_page` | Fetch and read the full text of a web page (executed server-side) |
+| *Your client's tools* | Bash, Read, Write, etc. — passed through for the client to execute |
 
 ## Client Setup
 
@@ -231,7 +232,7 @@ claude "Read the Python 3.14 release notes and summarize new features"
 
 That's it. Claude Code sends Anthropic-format requests → middleware translates internally → runs tool loop → returns Anthropic-format responses with `web_search` and `fetch_page` auto-injected.
 
-> The middleware only sends `web_search` + `fetch_page` to the LLM — Claude Code's own tools (Bash, Read, Write, etc.) are stripped and handled by Claude Code itself. This prevents small local models from getting confused by too many tools. If the LLM can't converge on an answer, the middleware returns accumulated search results as a fallback instead of an error.
+> The middleware auto-injects `web_search` + `fetch_page` alongside your client's existing tools. The LLM sees both — client tools (Bash, Read, Write, etc.) are passed through and executed by the client, while search tools are handled server-side. If the LLM hallucinates a tool name that doesn't exist, the middleware feeds back an error so the model can recover. If the LLM can't converge on an answer, the middleware returns accumulated search results as a fallback instead of an error.
 
 ---
 
@@ -315,7 +316,7 @@ Set `"id"` to the model ID loaded in LM Studio (or leave `local-model` — LM St
 
 **Sizing the token limits** — `maxInputTokens + maxOutputTokens` must fit inside the model's context window, minus headroom for the search results and fetched pages the middleware appends server-side (Copilot doesn't see those, so it can't budget for them). For a 100k-context model, `maxInputTokens: 80000` + `maxOutputTokens: 8192` leaves ~12k of headroom for tool results. Also make sure LM Studio's context length for the loaded model is actually set that high — it defaults to a much smaller value regardless of what the model supports. If you overshoot, the middleware returns a context-overflow error rather than silently truncating.
 
-> BYOK models power **chat only** — inline code completions stay on GitHub's models. Copilot's **agent mode** is not supported: the middleware strips client tools before calling the LLM (see the Claude Code note above), so use ask/chat mode.
+> BYOK models power **chat only** — inline code completions stay on GitHub's models. Copilot's **agent mode** works with the middleware (client tools are passed through to the LLM), though small local models may struggle with many tools. Use ask/chat mode for best results.
 
 ---
 
@@ -355,7 +356,7 @@ Set `model` to the model ID loaded in LM Studio (must match a model in the `/v1/
 
 **Sizing** — `model_context_window` should match the loaded model's context size. `model_auto_compact_token_limit` triggers auto-compaction at ~85% of context. Leave ~12k headroom for search results the middleware appends server-side.
 
-> **Chat/ask mode only** — agent mode is not supported. The middleware strips client tools (bash, read, write, etc.) before calling the LLM; only `web_search` and `fetch_page` are passed through. Use ask/chat mode for search-augmented answers.
+> **Chat/ask mode works best** — agent mode is supported (client tools are passed through), but small local models may struggle with many concurrent tool definitions. Use ask/chat mode for the best search-augmented experience.
 
 ---
 

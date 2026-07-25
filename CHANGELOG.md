@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-07-25
+
+### Changed
+- **Client tool passthrough** — the middleware now passes all client-provided tools (Bash, Read, Write, etc.) to the LLM alongside `web_search` and `fetch_page`. The local LLM sees all available tools, preserving existing capabilities while adding search on top. Previously, client tools were hidden from the LLM to reduce tool-definition load on small models.
+- **Three-way tool classification** — tool calls are now classified as search tools (executed server-side), client tools (returned to the caller for execution), or hallucinations (blocked with error feedback). This means Claude Code, Codex, and other clients can now use their native tools through the middleware while still getting search augmentation.
+- **Streaming tool passthrough** — client tool calls in streaming mode are emitted as SSE delta chunks with `finish_reason: "tool_use"`, allowing the Anthropic and Responses adapters to capture and relay them to the caller.
+
+### Fixed
+- **Local file access blocked** — `fetch_page` rejected `file://` URLs with "only http/https allowed". Now, if a client provides a `read_file` tool, the LLM can call it and the call is passed through to the client for local execution.
+
 ## [0.2.6] — 2026-07-23
 
 ### Added
