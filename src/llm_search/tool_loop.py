@@ -226,12 +226,11 @@ async def run_tool_loop(
     max_iter = settings.max_tool_loop_iterations
 
     # Merge client-provided tools with auto-injected search tools.
-    # The LLM sees everything: client tools (bash, read, etc.) +
-    # web_search + fetch_page. This preserves the local LLM's existing
-    # capabilities while adding search on top.
+    # The LLM sees client tools + web_search + fetch_page. To prevent
+    # overwhelming small local models, we cap the number of client tools
+    # via max_client_tools (env: MAX_CLIENT_TOOLS, default 4). Set to 0
+    # to disable client tool passthrough entirely.
     all_tools = inject_tools(tools)
-    # Build a set of client tool names for distinguishing genuine
-    # passthrough tools from model hallucinations.
     client_tool_names: set[str] = set()
     if tools:
         for t in tools:
@@ -240,6 +239,34 @@ async def run_tool_loop(
                 name = func.get("name", "")
                 if name:
                     client_tool_names.add(name)
+
+    # Trim client tools to the configured limit (search tools are always sent)
+    if settings.max_client_tools >= 0 and len(client_tool_names) > settings.max_client_tools:
+        overflow = len(client_tool_names) - settings.max_client_tools
+        logger.info(
+            "Trimming %d client tools (limit: %d) — set MAX_CLIENT_TOOLS to "
+            "increase or 0 to disable passthrough",
+            overflow, settings.max_client_tools,
+        )
+        # Keep only the first N client tools by preserving order from all_tools
+        kept_client: set[str] = set()
+        trimmed_tools: list[dict[str, Any]] = []
+        for t in all_tools:
+            name = (t.get("function") or {}).get("name", "")
+            if name in TOOL_EXECUTORS:
+                # Always keep search tools
+                trimmed_tools.append(t)
+            elif name in client_tool_names:
+                if len(kept_client) < settings.max_client_tools:
+                    kept_client.add(name)
+                    trimmed_tools.append(t)
+                # else: skip this client tool (trimmed)
+            else:
+                trimmed_tools.append(t)
+        all_tools = trimmed_tools
+        # Update client_tool_names to only include tools actually sent
+        client_tool_names = kept_client
+
     conversation = list(messages)  # Copy — we'll mutate this
     total_searches = 0
     total_tool_calls = 0
@@ -458,10 +485,11 @@ async def run_tool_loop_streaming(
     max_iter = settings.max_tool_loop_iterations
 
     # Merge client-provided tools with auto-injected search tools.
-    # The LLM sees everything: client tools + web_search + fetch_page.
+    # The LLM sees client tools + web_search + fetch_page. To prevent
+    # overwhelming small local models, we cap the number of client tools
+    # via max_client_tools (env: MAX_CLIENT_TOOLS, default 4). Set to 0
+    # to disable client tool passthrough entirely.
     all_tools = inject_tools(tools)
-    # Build a set of client tool names for distinguishing genuine
-    # passthrough tools from model hallucinations.
     client_tool_names: set[str] = set()
     if tools:
         for t in tools:
@@ -470,6 +498,30 @@ async def run_tool_loop_streaming(
                 name = func.get("name", "")
                 if name:
                     client_tool_names.add(name)
+
+    # Trim client tools to the configured limit (search tools are always sent)
+    if settings.max_client_tools >= 0 and len(client_tool_names) > settings.max_client_tools:
+        overflow = len(client_tool_names) - settings.max_client_tools
+        logger.info(
+            "Trimming %d client tools (limit: %d) — set MAX_CLIENT_TOOLS to "
+            "increase or 0 to disable passthrough",
+            overflow, settings.max_client_tools,
+        )
+        kept_client: set[str] = set()
+        trimmed_tools: list[dict[str, Any]] = []
+        for t in all_tools:
+            name = (t.get("function") or {}).get("name", "")
+            if name in TOOL_EXECUTORS:
+                trimmed_tools.append(t)
+            elif name in client_tool_names:
+                if len(kept_client) < settings.max_client_tools:
+                    kept_client.add(name)
+                    trimmed_tools.append(t)
+            else:
+                trimmed_tools.append(t)
+        all_tools = trimmed_tools
+        client_tool_names = kept_client
+
     conversation = list(messages)
     total_searches = 0
     total_tool_calls = 0

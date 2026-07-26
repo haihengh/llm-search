@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     search_cache_ttl_seconds: int = 300
     rate_limit_per_minute: int = 30
     max_search_results: int = 5
+    max_client_tools: int = 4
 
     # --- Logging ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
