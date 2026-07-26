@@ -402,6 +402,22 @@ async def messages(request: Request):
                 first_chunk: str | None = await stream_gen.__anext__()
             except StopAsyncIteration:
                 first_chunk = None
+            except Exception as exc:
+                # Any unexpected error (timeout, network, etc.) during the
+                # first streaming iteration — surface as a proper API error
+                # instead of a 500 so Claude Code can react gracefully.
+                logger.exception("Error during first streaming chunk")
+                status_code = 400 if is_context_overflow(LMStudioError(str(exc))) else 502
+                return JSONResponse(
+                    status_code=status_code,
+                    content={
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error" if status_code == 400 else "api_error",
+                            "message": str(exc),
+                        },
+                    },
+                )
 
             # If the very first event is an error, return it as a plain
             # HTTP error so Claude Code can react (auto-compact, etc.).
@@ -541,6 +557,17 @@ async def responses_api(request: Request):
             first_chunk: str | None = await stream_gen.__anext__()
         except StopAsyncIteration:
             first_chunk = None
+        except Exception as exc:
+            logger.exception("Error during first streaming chunk (Responses)")
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "code": "server_error",
+                        "message": str(exc),
+                    }
+                },
+            )
 
         if first_chunk and first_chunk.startswith("event: error"):
             try:
