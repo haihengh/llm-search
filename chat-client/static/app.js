@@ -129,8 +129,17 @@ async function loadModels() {
 
         dom.modelSelect.innerHTML = '';
 
+        // Always add a "default" option that uses whatever model is
+        // currently loaded in LM Studio — no need to pick a specific one.
+        const defaultOption = document.createElement('option');
+        defaultOption.value = 'local-model';
+        defaultOption.textContent = '🔄 Use currently loaded model';
+        dom.modelSelect.appendChild(defaultOption);
+
         if (state.models.length === 0) {
-            dom.modelSelect.innerHTML = '<option value="">No models found</option>';
+            // Still show the default option even if model list is empty
+            state.selectedModel = 'local-model';
+            dom.modelSelect.value = 'local-model';
             return;
         }
 
@@ -142,12 +151,20 @@ async function loadModels() {
             dom.modelSelect.appendChild(option);
         });
 
-        state.selectedModel = state.models[0].id || state.models[0].name || '';
-        dom.modelSelect.value = state.selectedModel;
+        // Default to "use currently loaded model" rather than a specific one
+        state.selectedModel = 'local-model';
+        dom.modelSelect.value = 'local-model';
     } catch (error) {
         console.error('Failed to load models:', error);
-        dom.modelSelect.innerHTML = '<option value="">Models unavailable</option>';
-        showError('Could not connect to LLM backend. Is LM Studio running?');
+        // Still provide the default option so the user can chat
+        dom.modelSelect.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = 'local-model';
+        defaultOption.textContent = '🔄 Use currently loaded model';
+        dom.modelSelect.appendChild(defaultOption);
+        state.selectedModel = 'local-model';
+        dom.modelSelect.value = 'local-model';
+        showError('Could not load model list — using default. Is LM Studio running?');
     }
 }
 

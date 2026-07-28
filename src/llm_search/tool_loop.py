@@ -91,7 +91,7 @@ async def call_lm_studio(
             return response.json()
         except httpx.ConnectError:
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, httpx.ReadTimeout):
             raise LMStudioError(
                 f"LM Studio request timed out after {settings.lm_studio_timeout}s "
                 f"(model may be slow with many tools — try increasing "
@@ -154,7 +154,7 @@ async def call_lm_studio_streaming(
                             logger.debug("Skipping unparseable SSE line: %s", line[:100])
         except httpx.ConnectError:
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, httpx.ReadTimeout):
             raise LMStudioError(
                 f"LM Studio streaming request timed out after "
                 f"{settings.lm_studio_timeout}s per read — the model may be "
@@ -666,8 +666,10 @@ async def run_tool_loop_streaming(
                                 "Model returned empty text after %d search(es) — "
                                 "falling back to raw search results", total_searches
                             )
+                            yield _chunk_sse({"role": "assistant"})
                             yield _chunk_sse({"content": fallback}, "stop")
                         else:
+                            yield _chunk_sse({"role": "assistant"})
                             yield _chunk_sse({}, "stop")
                     else:
                         # Completely empty response — no text, no tool calls,
@@ -679,6 +681,7 @@ async def run_tool_loop_streaming(
                             "(%d chunks, 0 text, 0 tool calls, 0 searches)",
                             chunk_count,
                         )
+                        yield _chunk_sse({"role": "assistant"})
                         yield _chunk_sse(
                             {"content": (
                                 "The model returned an empty response. "

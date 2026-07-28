@@ -100,7 +100,7 @@ http://localhost:8080
 - **Streaming chat** — responses appear token-by-token
 - **Image upload** — paste from clipboard (`Ctrl+V`) or pick from file dialog; sent as OpenAI vision-format content
 - **File upload** — text files (.txt, .py, .md, .json, etc.) are read and included in the message
-- **Model selector** — auto-populated from LM Studio's `/v1/models`
+- **Model selector** — auto-populated from LM Studio's `/v1/models`, defaults to "Use currently loaded model" so you don't need to pick a specific one
 - **Dark mode** — automatic via system preference
 - **Markdown rendering** — code blocks, tables, lists with syntax highlighting
 - **PWA (Progressive Web App)** — installable on iOS and Android home screens, launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.

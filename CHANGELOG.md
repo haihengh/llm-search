@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Default model option in chat UI** — the model dropdown now shows "🔄 Use currently loaded model" as the first and default option, so users don't need to pick a specific model. Whatever model is loaded in LM Studio is used automatically. The model list is still available for explicit selection.
+
+### Fixed
+- **Missing `role: "assistant"` in empty-response SSE chunks** — several edge-case paths in the streaming tool loop (empty response after search, completely empty response) were missing the required `role` delta, which could cause some clients to hang or error.
+- **`httpx.ReadTimeout` not caught** — streaming timeouts during `aiter_lines()` were not handled by the existing `TimeoutException` catch, causing 500 errors on slow LLM responses. Both `TimeoutException` and `ReadTimeout` are now caught in both streaming and non-streaming paths.
+- **Configurable timeout and tool limits in Docker Compose** — `MAX_CLIENT_TOOLS` and `LM_STUDIO_TIMEOUT` are now exposed as environment variables in `docker-compose.yml`, matching the already-documented `.env.example` settings.
+
 ## [0.2.7] — 2026-07-25
 
 ### Changed
