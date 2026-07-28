@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-07-28
+
 ### Added
 - **Default model option in chat UI** — the model dropdown now shows "🔄 Use currently loaded model" as the first and default option, so users don't need to pick a specific model. Whatever model is loaded in LM Studio is used automatically. The model list is still available for explicit selection.
 
@@ -145,3 +147,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2
 [0.2.5]: https://github.com/haihengh/llm-search/compare/v0.2.4...v0.2.5
+[0.2.8]: https://github.com/haihengh/llm-search/compare/v0.2.7...v0.2.8
