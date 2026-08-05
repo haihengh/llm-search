@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from .cache import cache
+from .config import runtime_config
 from .fetch_page import fetch_page_text
 from .search.base import SearchProvider, format_results_for_llm
 
@@ -106,8 +107,9 @@ async def execute_web_search(
     Checks the cache first; on miss, queries the search provider.
     The result is formatted as compact text for LLM consumption.
     """
-    # Clamp num_results
-    num_results = max(1, min(num_results, 10))
+    # Clamp num_results to configured max
+    max_n = max(1, runtime_config.max_search_results)
+    num_results = max(1, min(num_results, max_n))
 
     # Check cache
     cached = cache.get(query, num_results)

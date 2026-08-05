@@ -101,6 +101,8 @@ http://localhost:8080
 - **Image upload** — paste from clipboard (`Ctrl+V`) or pick from file dialog; sent as OpenAI vision-format content
 - **File upload** — text files (.txt, .py, .md, .json, etc.) are read and included in the message
 - **Model selector** — auto-populated from LM Studio's `/v1/models`, defaults to "Use currently loaded model" so you don't need to pick a specific one
+- **Settings modal** — click ⚙️ to change LLM URL, search provider, timeout, and other settings at runtime without editing files or restarting
+- **Performance panel** — click 📊 to open a real-time stats sidebar showing LLM latency, token generation speed, tool-call breakdowns, cache hit rates, and session uptime
 - **Dark mode** — automatic via system preference
 - **Markdown rendering** — code blocks, tables, lists with syntax highlighting
 - **PWA (Progressive Web App)** — installable on iOS and Android home screens, launches fullscreen like a native app. Includes a service worker for offline caching and an install banner with platform-specific instructions.

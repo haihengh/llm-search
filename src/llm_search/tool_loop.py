@@ -7,12 +7,14 @@ back to the LLM, and loops until the LLM produces a plain text answer.
 
 import json
 import logging
+import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
 import httpx
 
-from .config import settings
+from .config import runtime_config
 from .search.base import SearchProvider
 from .tool_registry import (
     FETCH_PAGE,
@@ -63,6 +65,104 @@ def is_context_overflow(exc: LMStudioError) -> bool:
     return any(marker in msg for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
+# ── Stats Collector ────────────────────────────────────────────
+
+@dataclass
+class ToolLoopStats:
+    """Per-request statistics collected during the tool loop."""
+
+    llm_call_count: int = 0
+    llm_total_ms: float = 0.0
+    web_search_count: int = 0
+    fetch_page_count: int = 0
+    hallucinated_tool_count: int = 0
+    passthrough_tool_count: int = 0
+    total_iterations: int = 0
+
+    # Token-level timing (extracted from LM Studio usage + timings)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    prompt_total_ms: float = 0.0          # time spent processing the prompt
+    generation_total_ms: float = 0.0       # time spent generating tokens
+
+    # Timestamps for the last LLM call
+    last_llm_ms: float = 0.0
+    _llm_timings: list[float] = field(default_factory=list)
+
+    def record_llm_call(self, elapsed_ms: float) -> None:
+        self.llm_call_count += 1
+        self.llm_total_ms += elapsed_ms
+        self.last_llm_ms = elapsed_ms
+        self._llm_timings.append(elapsed_ms)
+
+    def record_token_usage(
+        self,
+        usage: dict[str, Any] | None,
+        timings: dict[str, Any] | None = None,
+    ) -> None:
+        """Ingest usage + timings from an LM Studio / llama.cpp response."""
+        if usage:
+            self.prompt_tokens += usage.get("prompt_tokens", 0)
+            self.completion_tokens += usage.get("completion_tokens", 0)
+        if timings:
+            self.prompt_total_ms += timings.get("prompt_ms", 0)
+            self.generation_total_ms += timings.get("predicted_ms", 0)
+
+    @property
+    def llm_avg_ms(self) -> float:
+        if self.llm_call_count == 0:
+            return 0.0
+        return self.llm_total_ms / self.llm_call_count
+
+    @property
+    def tokens_per_second(self) -> float:
+        """Estimated completion tokens per second.
+
+        Uses generation_total_ms if the backend provides it (llama.cpp
+        ``timings.predicted_ms``), otherwise falls back to wall-clock
+        total LLM time (which is a slight underestimate since it
+        includes prompt processing).
+        """
+        if self.generation_total_ms > 0:
+            return self.completion_tokens / (self.generation_total_ms / 1000)
+        # Fallback: wall-clock time (prompt processing is typically fast
+        # enough that this is a reasonable approximation).
+        if self.completion_tokens > 0 and self.llm_total_ms > 0:
+            return self.completion_tokens / (self.llm_total_ms / 1000)
+        return 0.0
+
+    @property
+    def prompt_tokens_per_second(self) -> float:
+        """Estimated prompt processing speed (tokens/sec).
+
+        Uses prompt_total_ms if available, otherwise wall-clock fallback.
+        """
+        if self.prompt_total_ms > 0:
+            return self.prompt_tokens / (self.prompt_total_ms / 1000)
+        if self.prompt_tokens > 0 and self.llm_total_ms > 0:
+            return self.prompt_tokens / (self.llm_total_ms / 1000)
+        return 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "llm_call_count": self.llm_call_count,
+            "llm_total_ms": round(self.llm_total_ms, 1),
+            "llm_avg_ms": round(self.llm_avg_ms, 1),
+            "last_llm_ms": round(self.last_llm_ms, 1),
+            "web_search_count": self.web_search_count,
+            "fetch_page_count": self.fetch_page_count,
+            "hallucinated_tool_count": self.hallucinated_tool_count,
+            "passthrough_tool_count": self.passthrough_tool_count,
+            "total_iterations": self.total_iterations,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "prompt_total_ms": round(self.prompt_total_ms, 1),
+            "generation_total_ms": round(self.generation_total_ms, 1),
+            "tokens_per_second": round(self.tokens_per_second, 1),
+            "prompt_tokens_per_second": round(self.prompt_tokens_per_second, 1),
+        }
+
+
 # ── LM Studio Chat Client ─────────────────────────────────────
 
 async def call_lm_studio(
@@ -84,7 +184,8 @@ async def call_lm_studio(
     if tools:
         payload["tools"] = tools
 
-    async with httpx.AsyncClient(timeout=settings.lm_studio_timeout) as client:
+    timeout = runtime_config.lm_studio_timeout
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             response = await client.post(url, json=payload)
             response.raise_for_status()
@@ -93,7 +194,7 @@ async def call_lm_studio(
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
         except (httpx.TimeoutException, httpx.ReadTimeout):
             raise LMStudioError(
-                f"LM Studio request timed out after {settings.lm_studio_timeout}s "
+                f"LM Studio request timed out after {timeout}s "
                 f"(model may be slow with many tools — try increasing "
                 f"LM_STUDIO_TIMEOUT or reducing the number of client tools)"
             )
@@ -130,7 +231,8 @@ async def call_lm_studio_streaming(
     if tools:
         payload["tools"] = tools
 
-    async with httpx.AsyncClient(timeout=settings.lm_studio_timeout) as client:
+    timeout = runtime_config.lm_studio_timeout
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             async with client.stream("POST", url, json=payload) as response:
                 if response.status_code >= 400:
@@ -157,7 +259,7 @@ async def call_lm_studio_streaming(
         except (httpx.TimeoutException, httpx.ReadTimeout):
             raise LMStudioError(
                 f"LM Studio streaming request timed out after "
-                f"{settings.lm_studio_timeout}s per read — the model may be "
+                f"{timeout}s per read — the model may be "
                 f"generating too slowly or hung"
             )
         except httpx.HTTPStatusError as exc:
@@ -222,8 +324,8 @@ async def run_tool_loop(
         ToolLoopExhaustedError: Max iterations exceeded
         LMStudioError: LM Studio is unreachable or errors
     """
-    url = lm_studio_url or settings.lm_studio_url
-    max_iter = settings.max_tool_loop_iterations
+    url = lm_studio_url or runtime_config.lm_studio_url
+    max_iter = runtime_config.max_tool_loop_iterations
 
     # Merge client-provided tools with auto-injected search tools.
     # The LLM sees client tools + web_search + fetch_page. To prevent
@@ -241,12 +343,12 @@ async def run_tool_loop(
                     client_tool_names.add(name)
 
     # Trim client tools to the configured limit (search tools are always sent)
-    if settings.max_client_tools >= 0 and len(client_tool_names) > settings.max_client_tools:
-        overflow = len(client_tool_names) - settings.max_client_tools
+    if runtime_config.max_client_tools >= 0 and len(client_tool_names) > runtime_config.max_client_tools:
+        overflow = len(client_tool_names) - runtime_config.max_client_tools
         logger.info(
             "Trimming %d client tools (limit: %d) — set MAX_CLIENT_TOOLS to "
             "increase or 0 to disable passthrough",
-            overflow, settings.max_client_tools,
+            overflow, runtime_config.max_client_tools,
         )
         # Keep only the first N client tools by preserving order from all_tools
         kept_client: set[str] = set()
@@ -257,7 +359,7 @@ async def run_tool_loop(
                 # Always keep search tools
                 trimmed_tools.append(t)
             elif name in client_tool_names:
-                if len(kept_client) < settings.max_client_tools:
+                if len(kept_client) < runtime_config.max_client_tools:
                     kept_client.add(name)
                     trimmed_tools.append(t)
                 # else: skip this client tool (trimmed)
@@ -270,6 +372,7 @@ async def run_tool_loop(
     conversation = list(messages)  # Copy — we'll mutate this
     total_searches = 0
     total_tool_calls = 0
+    stats = ToolLoopStats()
 
     for iteration in range(1, max_iter + 1):
         logger.debug("Tool loop iteration %d/%d", iteration, max_iter)
@@ -288,22 +391,30 @@ async def run_tool_loop(
             })
 
         # Send to LM Studio
+        t0 = time.monotonic()
         response = await call_lm_studio(
             messages=conversation,
             tools=all_tools,
             model=model,
             lm_studio_url=url,
         )
+        stats.record_llm_call((time.monotonic() - t0) * 1000)
+        stats.record_token_usage(
+            response.get("usage"),
+            response.get("timings"),
+        )
 
         content, tool_calls = extract_assistant_message(response)
 
         # No tool calls → LLM is done, return the answer
         if not tool_calls:
+            stats.total_iterations = iteration
             return {
                 "content": content or "",
                 "tool_calls_count": total_tool_calls,
                 "iterations": iteration,
                 "searches": total_searches,
+                "stats": stats.to_dict(),
             }
 
         # Build the assistant message with tool_calls to append to conversation
@@ -327,9 +438,11 @@ async def run_tool_loop(
                 search_tool_calls.append(tc)
             elif tool_name in client_tool_names:
                 passthrough_tool_calls.append(tc)
+                stats.passthrough_tool_count += 1
                 logger.info("Client tool %r — will passthrough to caller", tool_name)
             elif tool_name:
                 hallucinated_tool_calls.append(tc)
+                stats.hallucinated_tool_count += 1
                 logger.info("Hallucinated tool %r — will block", tool_name)
             else:
                 logger.warning(
@@ -356,6 +469,9 @@ async def run_tool_loop(
             # Track searches
             if tool_name == WEB_SEARCH:
                 total_searches += 1
+                stats.web_search_count += 1
+            elif tool_name == FETCH_PAGE:
+                stats.fetch_page_count += 1
             total_tool_calls += 1
 
             # Execute the tool
@@ -409,6 +525,7 @@ async def run_tool_loop(
                 len(passthrough_tool_calls),
                 [tc.get("function", {}).get("name") for tc in passthrough_tool_calls],
             )
+            stats.total_iterations = iteration
             return {
                 "content": content or "",
                 "tool_calls": passthrough_tool_calls,
@@ -416,6 +533,7 @@ async def run_tool_loop(
                 "iterations": iteration,
                 "searches": total_searches,
                 "finish_reason": "tool_use",
+                "stats": stats.to_dict(),
             }
 
         # Loop continues — LLM sees the search results and responds
@@ -442,12 +560,14 @@ async def run_tool_loop(
             f"Last response had {total_tool_calls} tool calls."
         )
 
+    stats.total_iterations = max_iter
     return {
         "content": fallback_content,
         "tool_calls_count": total_tool_calls,
         "iterations": max_iter,
         "searches": total_searches,
         "finish_reason": "tool_loop_max",
+        "stats": stats.to_dict(),
     }
 
 
@@ -462,6 +582,7 @@ async def run_tool_loop_streaming(
     tools: Optional[list[dict[str, Any]]] = None,
     model: str = "local-model",
     lm_studio_url: Optional[str] = None,
+    stats_out: Optional[list[dict[str, Any]]] = None,
 ) -> AsyncGenerator[str, None]:
     """Execute the tool-call loop with single-pass streaming on every turn.
 
@@ -477,12 +598,16 @@ async def run_tool_loop_streaming(
     one LM Studio call per iteration — no second generation that can
     diverge from the first one.
 
+    If *stats_out* is provided, the final stats dict is appended to it
+    so the caller can aggregate per-request metrics without parsing the
+    stream.
+
     Yields:
         SSE-formatted strings: ``data: {json}\\n\\n`` per chunk.
         Terminates with ``data: [DONE]\\n\\n``.
     """
-    url = lm_studio_url or settings.lm_studio_url
-    max_iter = settings.max_tool_loop_iterations
+    url = lm_studio_url or runtime_config.lm_studio_url
+    max_iter = runtime_config.max_tool_loop_iterations
 
     # Merge client-provided tools with auto-injected search tools.
     # The LLM sees client tools + web_search + fetch_page. To prevent
@@ -500,12 +625,12 @@ async def run_tool_loop_streaming(
                     client_tool_names.add(name)
 
     # Trim client tools to the configured limit (search tools are always sent)
-    if settings.max_client_tools >= 0 and len(client_tool_names) > settings.max_client_tools:
-        overflow = len(client_tool_names) - settings.max_client_tools
+    if runtime_config.max_client_tools >= 0 and len(client_tool_names) > runtime_config.max_client_tools:
+        overflow = len(client_tool_names) - runtime_config.max_client_tools
         logger.info(
             "Trimming %d client tools (limit: %d) — set MAX_CLIENT_TOOLS to "
             "increase or 0 to disable passthrough",
-            overflow, settings.max_client_tools,
+            overflow, runtime_config.max_client_tools,
         )
         kept_client: set[str] = set()
         trimmed_tools: list[dict[str, Any]] = []
@@ -514,7 +639,7 @@ async def run_tool_loop_streaming(
             if name in TOOL_EXECUTORS:
                 trimmed_tools.append(t)
             elif name in client_tool_names:
-                if len(kept_client) < settings.max_client_tools:
+                if len(kept_client) < runtime_config.max_client_tools:
                     kept_client.add(name)
                     trimmed_tools.append(t)
             else:
@@ -526,10 +651,15 @@ async def run_tool_loop_streaming(
     total_searches = 0
     total_tool_calls = 0
     relayed_text = False  # True once any text content has been sent to caller
+    stats = ToolLoopStats()
 
     def _sse(data: dict[str, Any]) -> str:
         """Format a dict as an SSE data event."""
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def _stats_sse() -> str:
+        """Format current stats as an SSE named event."""
+        return f"event: stats\ndata: {json.dumps(stats.to_dict(), ensure_ascii=False)}\n\n"
 
     def _error_sse(message: str, error_type: str) -> str:
         """Format an error as an SSE data event."""
@@ -569,6 +699,7 @@ async def run_tool_loop_streaming(
             content_parts: list[str] = []
             tool_fragments: dict[int, dict[str, Any]] = {}
             chunk_count = 0
+            t0 = time.monotonic()
 
             async for chunk in call_lm_studio_streaming(
                 messages=conversation,
@@ -617,14 +748,29 @@ async def run_tool_loop_streaming(
                                 entry["function"] = {"name": "", "arguments": ""}
                             entry["function"]["arguments"] += func["arguments"]
 
+                # ── Token usage (final chunk carries usage + timings) ─
+                if "usage" in chunk:
+                    stats.record_token_usage(
+                        chunk["usage"],
+                        chunk.get("timings"),
+                    )
+
                 if finish_reason is not None:
                     break
+
+            stats.record_llm_call((time.monotonic() - t0) * 1000)
+
+            # LM Studio doesn't stream `usage` — estimate tokens from
+            # accumulated text (chars ÷ 4 ≈ tokens is standard heuristic).
+            total_text = "".join(content_parts)
+            if total_text:
+                stats.completion_tokens += max(1, len(total_text) // 4)
 
             logger.info(
                 "Streaming iteration %d done: %d chunks, %d text chars, "
                 "%d tool-call fragments, finish_reason not None",
                 iteration, chunk_count,
-                sum(len(p) for p in content_parts),
+                len(total_text),
                 len(tool_fragments),
             )
 
@@ -693,7 +839,11 @@ async def run_tool_loop_streaming(
                         )
                 else:
                     yield _chunk_sse({}, "stop")
+                stats.total_iterations = iteration
+                yield _stats_sse()
                 yield "data: [DONE]\n\n"
+                if stats_out is not None:
+                    stats_out.append(stats.to_dict())
                 return
 
             if content_parts:
@@ -719,11 +869,13 @@ async def run_tool_loop_streaming(
                     search_tool_calls.append(tc)
                 elif tool_name in client_tool_names:
                     passthrough_tool_calls.append(tc)
+                    stats.passthrough_tool_count += 1
                     logger.info(
                         "Client tool %r — will passthrough to caller", tool_name
                     )
                 elif tool_name:
                     hallucinated_tool_calls.append(tc)
+                    stats.hallucinated_tool_count += 1
                     logger.info(
                         "Hallucinated tool %r — will block", tool_name
                     )
@@ -750,6 +902,9 @@ async def run_tool_loop_streaming(
 
                 if tool_name == WEB_SEARCH:
                     total_searches += 1
+                    stats.web_search_count += 1
+                elif tool_name == FETCH_PAGE:
+                    stats.fetch_page_count += 1
                 total_tool_calls += 1
 
                 result_text = await dispatch_tool(
@@ -809,7 +964,11 @@ async def run_tool_loop_streaming(
                         {"tool_calls": [tc]},
                         "tool_use" if is_last else None,
                     )
+                stats.total_iterations = iteration
+                yield _stats_sse()
                 yield "data: [DONE]\n\n"
+                if stats_out is not None:
+                    stats_out.append(stats.to_dict())
                 return
 
             # Loop continues — LLM sees search results and responds
@@ -834,12 +993,19 @@ async def run_tool_loop_streaming(
                 f"Last response had {total_tool_calls} tool calls."
             )
 
+        stats.total_iterations = max_iter
         yield _chunk_sse({"role": "assistant"})
         yield _chunk_sse({"content": fallback}, "tool_loop_max")
+        yield _stats_sse()
         yield "data: [DONE]\n\n"
+        if stats_out is not None:
+            stats_out.append(stats.to_dict())
 
     except LMStudioError as exc:
         logger.error("LM Studio error during streaming: %s", exc)
         err_type = "context_overflow" if is_context_overflow(exc) else "lm_studio_error"
         yield _error_sse(str(exc), err_type)
+        yield _stats_sse()
         yield "data: [DONE]\n\n"
+        if stats_out is not None:
+            stats_out.append(stats.to_dict())

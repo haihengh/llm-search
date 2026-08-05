@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-05
+
+### Added
+- **Settings modal in chat UI** — click the ⚙️ gear icon to change LLM URL, search provider, timeout, and other settings at runtime without editing files or restarting. Backed by `GET /v1/config` and `PUT /v1/config` API endpoints with a `RuntimeConfig` layer that applies changes immediately.
+- **Performance stats sidebar** — click the 📊 chart icon to open a real-time performance panel showing LLM latency, token generation speed (tokens/sec), prompt processing speed, tool-call breakdowns (web searches, page fetches, passthrough tools, blocked hallucinations), cache hit rates, and session uptime. Polls `/stats` every 3 seconds and updates live during streaming via SSE `event: stats` events.
+- **Token-level timing** — the middleware now captures token usage from LM Studio responses (`usage.prompt_tokens`, `usage.completion_tokens`) and measures tokens-per-second. Falls back to wall-clock timing and content-length estimation when the backend doesn't provide `timings` data.
+- **`max_search_results` runtime config** — the search result count cap is now configurable via the settings modal and enforced by `tool_registry.py`.
+
+### Changed
+- **Runtime-configurable settings** — `tool_loop.py` and `server.py` now read from `RuntimeConfig` (mutable) instead of `Settings` (env-var immutable) for `lm_studio_url`, `max_tool_loop_iterations`, `max_client_tools`, `lm_studio_timeout`, and search provider settings. Changes take effect on the next request.
+- **Enhanced `/stats` endpoint** — now returns `total_fetch_pages`, `total_hallucinated_tools`, `total_passthrough_tools`, `llm_call_count`, `llm_avg_ms`, `total_prompt_tokens`, `total_completion_tokens`, `tokens_per_second`, `prompt_tokens_per_second`.
+- **Search provider hot-swap** — changing `search_provider` or `searxng_url` via the API recreates the search provider singleton without restarting. On failure (e.g. missing API key), the old provider is kept.
+- **Chat client layout** — the app now lives in a flex wrapper (`#wrapper`) that houses the main chat app and the collapsible stats sidebar side-by-side. On mobile, the sidebar overlays as a fixed panel.
+- **`max_search_results` wired up** — previously defined in config but never enforced; now clamps search result counts in `execute_web_search()`.
+
+### Fixed
+- **Streaming stats never aggregated** — `run_tool_loop_streaming()` now accepts a `stats_out` parameter (a mutable list). All three streaming paths (chat completions, Anthropic, Responses) capture per-request stats via `finally` blocks and call `_ingest_request_stats()`, so global counters accumulate from streaming requests.
+- **Anthropic + Responses non-streaming stats** — both paths were missing `_ingest_request_stats()` calls; added alongside the existing chat completions path.
+- **Stray text artifact in `tool_loop.py`** — fixed a `vnvn` prefix on the `TimeoutException` handler line.
+- **Unused `settings` import in `tool_loop.py`** — cleaned up after migrating to `RuntimeConfig`.
+
 ## [0.2.8] — 2026-07-28
 
 ### Added
@@ -147,4 +168,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2
 [0.2.5]: https://github.com/haihengh/llm-search/compare/v0.2.4...v0.2.5
+[0.3.0]: https://github.com/haihengh/llm-search/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/haihengh/llm-search/compare/v0.2.7...v0.2.8

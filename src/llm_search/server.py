@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .cache import cache as search_cache
-from .config import settings
+from .config import runtime_config, settings
 from .rate_limiter import rate_limiter
 from .search.base import SearchProvider
 from .search.brave import BraveSearchProvider
@@ -55,22 +55,45 @@ _search_provider: Optional[SearchProvider] = None
 
 
 def create_search_provider() -> SearchProvider:
-    """Build the search provider from configuration."""
-    if settings.search_provider == "brave":
-        if not settings.search_api_key:
+    """Build the search provider from *runtime* configuration."""
+    if runtime_config.search_provider == "brave":
+        if not runtime_config.search_api_key:
             raise ValueError("SEARCH_API_KEY is required when using Brave Search")
         logger.info("Using Brave Search API")
-        return BraveSearchProvider(api_key=settings.search_api_key)
+        return BraveSearchProvider(api_key=runtime_config.search_api_key)
 
-    if settings.search_provider == "serpapi":
-        if not settings.search_api_key:
+    if runtime_config.search_provider == "serpapi":
+        if not runtime_config.search_api_key:
             raise ValueError("SEARCH_API_KEY is required when using SerpAPI")
         logger.info("Using SerpAPI")
-        return SerpAPIProvider(api_key=settings.search_api_key)
+        return SerpAPIProvider(api_key=runtime_config.search_api_key)
 
     # Default: SearXNG
-    logger.info("Using SearXNG at %s", settings.searxng_url)
-    return SearXNGSearcher(base_url=settings.searxng_url)
+    logger.info("Using SearXNG at %s", runtime_config.searxng_url)
+    return SearXNGSearcher(base_url=runtime_config.searxng_url)
+
+
+def recreate_search_provider() -> Optional[SearchProvider]:
+    """Recreate the search provider (called after runtime config change).
+
+    Returns the new provider or None if recreation failed (e.g. missing API key).
+    On failure the old provider is kept.
+    """
+    global _search_provider
+    logger.info("Recreating search provider — config changed")
+    try:
+        new_provider = create_search_provider()
+    except ValueError as exc:
+        logger.warning("Cannot recreate search provider: %s — keeping old one", exc)
+        return None
+    if _search_provider is not None and hasattr(_search_provider, "close"):
+        try:
+            import asyncio
+            asyncio.ensure_future(_search_provider.close())
+        except Exception:
+            pass
+    _search_provider = new_provider
+    return _search_provider
 
 
 def get_search_provider() -> SearchProvider:
@@ -92,10 +115,19 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logger.info("LLM Search v%s starting", _version)
-    logger.info("LM Studio URL: %s", settings.lm_studio_url)
-    logger.info("Search provider: %s", settings.search_provider)
+    logger.info("LM Studio URL: %s", runtime_config.lm_studio_url)
+    logger.info("Search provider: %s", runtime_config.search_provider)
 
     _search_provider = create_search_provider()
+
+    # Register hook: recreate search provider when config changes
+    def _on_config_change(key: str, old_val: Any, new_val: Any) -> None:
+        provider_keys = {"search_provider", "searxng_url", "search_api_key"}
+        if key in provider_keys:
+            logger.info("Config %r changed — recreating search provider", key)
+            recreate_search_provider()
+
+    runtime_config.on_change(_on_config_change)
 
     # Verify SearXNG/LM Studio connectivity (non-fatal)
     try:
@@ -186,10 +218,20 @@ class HealthResponse(BaseModel):
 class StatsResponse(BaseModel):
     total_requests: int
     total_searches: int
+    total_fetch_pages: int = 0
+    total_hallucinated_tools: int = 0
+    total_passthrough_tools: int = 0
     cache_hits: int
     cache_misses: int
     cache_hit_rate: float
     rate_limits_hit: int
+    llm_call_count: int = 0
+    llm_avg_ms: float = 0.0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    tokens_per_second: float = 0.0
+    prompt_tokens_per_second: float = 0.0
+    uptime_seconds: float = 0.0
 
 
 class ErrorResponse(BaseModel):
@@ -202,6 +244,32 @@ class ErrorResponse(BaseModel):
 _start_time = time.time()
 _request_count = 0
 _total_searches = 0
+_total_fetch_pages = 0
+_total_hallucinated = 0
+_total_passthrough = 0
+_llm_call_count = 0
+_llm_total_ms = 0.0
+_total_prompt_tokens = 0
+_total_completion_tokens = 0
+_total_prompt_ms = 0.0
+_total_generation_ms = 0.0
+
+
+def _ingest_request_stats(stats_dict: dict[str, Any]) -> None:
+    """Merge per-request tool-loop stats into global counters."""
+    global _total_fetch_pages, _total_hallucinated, _total_passthrough
+    global _llm_call_count, _llm_total_ms
+    global _total_prompt_tokens, _total_completion_tokens
+    global _total_prompt_ms, _total_generation_ms
+    _total_fetch_pages += stats_dict.get("fetch_page_count", 0)
+    _total_hallucinated += stats_dict.get("hallucinated_tool_count", 0)
+    _total_passthrough += stats_dict.get("passthrough_tool_count", 0)
+    _llm_call_count += stats_dict.get("llm_call_count", 0)
+    _llm_total_ms += stats_dict.get("llm_total_ms", 0)
+    _total_prompt_tokens += stats_dict.get("prompt_tokens", 0)
+    _total_completion_tokens += stats_dict.get("completion_tokens", 0)
+    _total_prompt_ms += stats_dict.get("prompt_total_ms", 0)
+    _total_generation_ms += stats_dict.get("generation_total_ms", 0)
 
 
 # ── Helper: Extract Client IP ─────────────────────────────────
@@ -246,6 +314,7 @@ async def chat_completions(request: Request, body: ChatRequest):
     if body.stream:
         chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
+        stats_container: list[dict[str, Any]] = []
 
         async def sse_safe_wrapper():
             """Wrap the streaming generator with fallback error handling."""
@@ -257,6 +326,7 @@ async def chat_completions(request: Request, body: ChatRequest):
                     created=created,
                     tools=body.tools,
                     model=body.model,
+                    stats_out=stats_container,
                 ):
                     yield chunk
             except Exception:
@@ -266,6 +336,9 @@ async def chat_completions(request: Request, body: ChatRequest):
                 )
                 yield f"data: {error_data}\n\n"
                 yield "data: [DONE]\n\n"
+            finally:
+                if stats_container:
+                    _ingest_request_stats(stats_container[0])
 
         return StreamingResponse(
             sse_safe_wrapper(),
@@ -309,6 +382,8 @@ async def chat_completions(request: Request, body: ChatRequest):
         )
 
     _total_searches += result.get("searches", 0)
+    if result.get("stats"):
+        _ingest_request_stats(result["stats"])
 
     # Build the assistant message, including any passthrough tool calls
     assistant_msg: dict[str, Any] = {
@@ -384,6 +459,7 @@ async def messages(request: Request):
             # on HTTP-level errors, not on in-stream SSE error events.
             chatcmpl_id = f"msg_{uuid.uuid4().hex[:12]}"
             created = int(time.time())
+            stats_container: list[dict[str, Any]] = []
 
             tool_loop_gen = run_tool_loop_streaming(
                 messages=openai_req["messages"],
@@ -392,6 +468,7 @@ async def messages(request: Request):
                 created=created,
                 tools=openai_req["tools"],
                 model=openai_req["model"],
+                stats_out=stats_container,
             )
             stream_gen = anthropic_stream_from_openai(
                 tool_loop_gen, model=model, request_id=chatcmpl_id,
@@ -455,6 +532,9 @@ async def messages(request: Request):
                         "event: message_stop\n"
                         'data: {"type":"message_stop"}\n\n'
                     )
+                finally:
+                    if stats_container:
+                        _ingest_request_stats(stats_container[0])
 
             return StreamingResponse(
                 sse_wrapper(),
@@ -474,6 +554,8 @@ async def messages(request: Request):
         )
 
         _total_searches += result.get("searches", 0)
+        if result.get("stats"):
+            _ingest_request_stats(result["stats"])
 
         return openai_response_to_anthropic(result, model)
 
@@ -539,6 +621,7 @@ async def responses_api(request: Request):
         resp_id = f"resp_{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         chatcmpl_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        stats_container: list[dict[str, Any]] = []
 
         tool_loop_gen = run_tool_loop_streaming(
             messages=openai_req["messages"],
@@ -547,6 +630,7 @@ async def responses_api(request: Request):
             created=created,
             tools=openai_req["tools"],
             model=openai_req["model"],
+            stats_out=stats_container,
         )
         stream_gen = responses_stream_from_tool_loop(
             tool_loop_gen, model=model, resp_id=resp_id,
@@ -594,6 +678,9 @@ async def responses_api(request: Request):
                     "event: response.completed\n"
                     f'data: {{"type":"response.completed","response":{{"id":"{resp_id}","object":"response","status":"incomplete","model":"{model}","output":[]}}}}\n\n'
                 )
+            finally:
+                if stats_container:
+                    _ingest_request_stats(stats_container[0])
 
         return StreamingResponse(
             sse_wrapper(),
@@ -629,6 +716,8 @@ async def responses_api(request: Request):
         result = {"content": str(exc), "tool_calls_count": 0, "iterations": 5, "searches": 0}
 
     _total_searches += result.get("searches", 0)
+    if result.get("stats"):
+        _ingest_request_stats(result["stats"])
 
     return openai_result_to_responses(result, model)
 
@@ -643,7 +732,7 @@ async def list_models():
     """
     import httpx
 
-    url = f"{settings.lm_studio_url.rstrip('/')}/models"
+    url = f"{runtime_config.lm_studio_url.rstrip('/')}/models"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url)
@@ -652,7 +741,7 @@ async def list_models():
     except httpx.ConnectError:
         raise HTTPException(
             status_code=502,
-            detail=f"LLM backend not reachable at {settings.lm_studio_url}",
+            detail=f"LLM backend not reachable at {runtime_config.lm_studio_url}",
         )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
@@ -676,7 +765,7 @@ async def health():
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{settings.lm_studio_url.rstrip('/')}/models")
+            resp = await client.get(f"{runtime_config.lm_studio_url.rstrip('/')}/models")
             lm_studio_ok = resp.status_code == 200
     except Exception:
         pass
@@ -687,7 +776,7 @@ async def health():
 
     return HealthResponse(
         status=status,
-        lm_studio_url=settings.lm_studio_url,
+        lm_studio_url=runtime_config.lm_studio_url,
         search_provider=get_search_provider().name,
         searxng_ok=searxng_ok,
         lm_studio_ok=lm_studio_ok,
@@ -699,15 +788,72 @@ async def health():
 
 @app.get("/stats", response_model=StatsResponse)
 async def stats():
-    """Usage statistics."""
+    """Usage statistics with LLM performance and tool-call breakdowns."""
+    avg_ms = round(_llm_total_ms / _llm_call_count, 1) if _llm_call_count > 0 else 0.0
+    # Prefer backend-reported timing; fall back to wall-clock LLM total time.
+    gen_ms = _total_generation_ms if _total_generation_ms > 0 else _llm_total_ms
+    prompt_ms = _total_prompt_ms if _total_prompt_ms > 0 else _llm_total_ms
+    tps = round(_total_completion_tokens / (gen_ms / 1000), 1) if gen_ms > 0 and _total_completion_tokens > 0 else 0.0
+    pps = round(_total_prompt_tokens / (prompt_ms / 1000), 1) if prompt_ms > 0 and _total_prompt_tokens > 0 else 0.0
     return StatsResponse(
         total_requests=_request_count,
         total_searches=_total_searches,
+        total_fetch_pages=_total_fetch_pages,
+        total_hallucinated_tools=_total_hallucinated,
+        total_passthrough_tools=_total_passthrough,
         cache_hits=search_cache.hits,
         cache_misses=search_cache.misses,
         cache_hit_rate=round(search_cache.hit_rate, 3),
         rate_limits_hit=rate_limiter.hits,
+        llm_call_count=_llm_call_count,
+        llm_avg_ms=avg_ms,
+        total_prompt_tokens=_total_prompt_tokens,
+        total_completion_tokens=_total_completion_tokens,
+        tokens_per_second=tps,
+        prompt_tokens_per_second=pps,
+        uptime_seconds=round(time.time() - _start_time, 1),
     )
+
+
+# ── Runtime Config API ─────────────────────────────────────
+
+class ConfigUpdateRequest(BaseModel):
+    """Fields for updating runtime config. All are optional."""
+    lm_studio_url: Optional[str] = None
+    search_provider: Optional[str] = None
+    searxng_url: Optional[str] = None
+    search_api_key: Optional[str] = None
+    max_tool_loop_iterations: Optional[int] = None
+    max_client_tools: Optional[int] = None
+    lm_studio_timeout: Optional[float] = None
+    max_search_results: Optional[int] = None
+
+
+@app.get("/v1/config")
+async def get_config():
+    """Return current runtime configuration (editable fields only)."""
+    return {
+        "config": runtime_config.to_dict(),
+        "immutable": {
+            "middleware_host": settings.middleware_host,
+            "middleware_port": settings.middleware_port,
+            "rate_limit_per_minute": settings.rate_limit_per_minute,
+            "search_cache_ttl_seconds": settings.search_cache_ttl_seconds,
+            "log_level": settings.log_level,
+        },
+    }
+
+
+@app.put("/v1/config")
+async def update_config(body: ConfigUpdateRequest):
+    """Update runtime configuration. Only provided fields are changed."""
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return {"changed": {}, "config": runtime_config.to_dict()}
+
+    changed = runtime_config.update(**updates)
+    logger.info("Runtime config updated: %s", changed)
+    return {"changed": changed, "config": runtime_config.to_dict()}
 
 
 # ── Error Handlers ────────────────────────────────────────────

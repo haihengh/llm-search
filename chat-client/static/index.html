@@ -20,6 +20,7 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <div id="wrapper">
     <div id="app">
         <!-- Header -->
         <header id="header">
@@ -28,6 +29,8 @@
                 <select id="model-select" title="Select model">
                     <option value="">Loading models…</option>
                 </select>
+                <button id="stats-toggle-btn" title="Toggle performance panel" aria-label="Toggle performance panel">&#x1F4CA;</button>
+                <button id="settings-btn" title="Settings" aria-label="Settings">&#x2699;&#xFE0F;</button>
                 <button id="clear-btn" title="Clear conversation" aria-label="Clear conversation">&#x1F5D1;</button>
             </div>
         </header>
@@ -91,6 +94,111 @@
                 </button>
             </div>
         </footer>
+
+        <!-- Settings Modal -->
+        <div id="settings-overlay" class="hidden">
+            <div id="settings-modal">
+                <div id="settings-header">
+                    <h2>&#x2699;&#xFE0F; Settings</h2>
+                    <button id="settings-close-btn" title="Close" aria-label="Close settings">&times;</button>
+                </div>
+                <div id="settings-body">
+                    <div class="settings-section">
+                        <h3>LLM Connection</h3>
+                        <label>
+                            LM Studio URL
+                            <input type="text" id="cfg-lm-studio-url" placeholder="http://host.docker.internal:1234/v1">
+                            <span class="settings-hint">e.g. http://localhost:1234/v1 or http://192.168.1.50:1234/v1</span>
+                        </label>
+                        <label>
+                            Timeout (seconds)
+                            <input type="number" id="cfg-timeout" min="10" max="600" step="1" placeholder="120">
+                        </label>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Search Provider</h3>
+                        <label>
+                            Provider
+                            <select id="cfg-search-provider">
+                                <option value="searxng">SearXNG (self-hosted, no API key)</option>
+                                <option value="brave">Brave Search</option>
+                                <option value="serpapi">SerpAPI</option>
+                            </select>
+                        </label>
+                        <label id="cfg-searxng-group">
+                            SearXNG URL
+                            <input type="text" id="cfg-searxng-url" placeholder="http://searxng:8080">
+                        </label>
+                        <label>
+                            API Key (Brave / SerpAPI)
+                            <input type="password" id="cfg-search-api-key" placeholder="(leave empty for SearXNG)">
+                        </label>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Limits</h3>
+                        <label>
+                            Max tool loop iterations
+                            <input type="number" id="cfg-max-iterations" min="1" max="20" step="1" placeholder="10">
+                        </label>
+                        <label>
+                            Max client tools
+                            <input type="number" id="cfg-max-client-tools" min="0" max="50" step="1" placeholder="12">
+                        </label>
+                        <label>
+                            Max search results
+                            <input type="number" id="cfg-max-results" min="1" max="20" step="1" placeholder="5">
+                        </label>
+                    </div>
+                </div>
+                <div id="settings-footer">
+                    <span id="settings-status"></span>
+                    <button id="settings-save-btn">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Performance Stats Sidebar -->
+    <aside id="stats-panel" class="collapsed">
+        <div id="stats-panel-header">
+            <h3>&#x1F4CA; Performance</h3>
+            <button id="stats-panel-close-btn" title="Close panel" aria-label="Close stats panel">&times;</button>
+        </div>
+        <div id="stats-panel-body">
+            <div class="stat-card">
+                <div class="stat-label">Session</div>
+                <div class="stat-row"><span>Total Requests</span><span id="stat-requests">0</span></div>
+                <div class="stat-row"><span>Uptime</span><span id="stat-uptime">0s</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">LLM Performance</div>
+                <div class="stat-row"><span>LLM Calls</span><span id="stat-llm-calls">0</span></div>
+                <div class="stat-row"><span>Avg Latency</span><span id="stat-llm-avg">—</span></div>
+                <div class="stat-row"><span>Last Latency</span><span id="stat-llm-last">—</span></div>
+                <div class="stat-row"><span>Prompt Speed</span><span id="stat-prompt-tps">—</span></div>
+                <div class="stat-row"><span>Gen Speed</span><span id="stat-gen-tps">—</span></div>
+                <div class="stat-row"><span>Tokens (P/G)</span><span id="stat-tokens">—</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Tool Calls</div>
+                <div class="stat-row"><span>Web Searches</span><span id="stat-searches">0</span></div>
+                <div class="stat-row"><span>Pages Fetched</span><span id="stat-fetches">0</span></div>
+                <div class="stat-row"><span>Passthrough</span><span id="stat-passthrough">0</span></div>
+                <div class="stat-row"><span>Blocked (halluc.)</span><span id="stat-hallucinated">0</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Cache</div>
+                <div class="stat-row"><span>Hit Rate</span><span id="stat-cache-rate">—</span></div>
+                <div class="stat-row"><span>Hits / Misses</span><span id="stat-cache-detail">0 / 0</span></div>
+            </div>
+            <div class="stat-card" id="stat-live-card">
+                <div class="stat-label">Last Request (live)</div>
+                <div id="stat-live-content">
+                    <span class="stat-idle">Waiting for next request…</span>
+                </div>
+            </div>
+        </div>
+    </aside>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>

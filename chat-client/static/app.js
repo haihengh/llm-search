@@ -16,6 +16,9 @@ const state = {
     selectedModel: '',
     models: [],
     abortController: null,
+    statsVisible: false,
+    lastLiveStats: null,    // from SSE event: stats
+    statsPollInterval: null,
 };
 
 // ── DOM refs ─────────────────────────────────────────────────────
@@ -42,6 +45,31 @@ const dom = {
     filePreviewSize: $('#file-preview-size'),
     removeFileBtn: $('#remove-file-btn'),
     errorBanner: $('#error-banner'),
+    // Settings
+    settingsBtn: $('#settings-btn'),
+    settingsOverlay: $('#settings-overlay'),
+    settingsCloseBtn: $('#settings-close-btn'),
+    settingsSaveBtn: $('#settings-save-btn'),
+    settingsStatus: $('#settings-status'),
+    // Stats panel
+    statsToggleBtn: $('#stats-toggle-btn'),
+    statsPanel: $('#stats-panel'),
+    statsCloseBtn: $('#stats-panel-close-btn'),
+    statRequests: $('#stat-requests'),
+    statUptime: $('#stat-uptime'),
+    statLlmCalls: $('#stat-llm-calls'),
+    statLlmAvg: $('#stat-llm-avg'),
+    statLlmLast: $('#stat-llm-last'),
+    statPromptTps: $('#stat-prompt-tps'),
+    statGenTps: $('#stat-gen-tps'),
+    statTokens: $('#stat-tokens'),
+    statSearches: $('#stat-searches'),
+    statFetches: $('#stat-fetches'),
+    statPassthrough: $('#stat-passthrough'),
+    statHallucinated: $('#stat-hallucinated'),
+    statCacheRate: $('#stat-cache-rate'),
+    statCacheDetail: $('#stat-cache-detail'),
+    statLiveContent: $('#stat-live-content'),
 };
 
 // ── Initialization ───────────────────────────────────────────────
@@ -49,11 +77,14 @@ const dom = {
 async function init() {
     configureMarked();
     initEventListeners();
+    initSettingsModal();
+    initStatsPanel();
     initMobileKeyboardHandler();
     initInstallBanner();
     await loadModels();
     updateSendButton();
     dom.messageInput.focus();
+    startStatsPolling();
 }
 
 function configureMarked() {
@@ -292,6 +323,10 @@ async function streamResponse(response) {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    // Reset live stats for this request
+    state.lastLiveStats = null;
+    updateLiveStats(null);
+
     // Create assistant message
     const assistantMsg = { role: 'assistant', content: '' };
     state.messages.push(assistantMsg);
@@ -304,6 +339,7 @@ async function streamResponse(response) {
     // Throttle: only re-render markdown at most every 50ms
     let lastRender = 0;
     let pendingContent = '';
+    let lastEventType = '';
 
     function flushContent() {
         if (pendingContent !== assistantMsg.content) {
@@ -325,10 +361,33 @@ async function streamResponse(response) {
 
             for (const line of lines) {
                 const trimmed = line.trim();
+
+                // Track SSE event type
+                if (trimmed.startsWith('event: ')) {
+                    lastEventType = trimmed.slice(7);
+                    continue;
+                }
+
                 if (!trimmed.startsWith('data: ')) continue;
 
                 const data = trimmed.slice(6);
-                if (data === '[DONE]') continue;
+                if (data === '[DONE]') {
+                    lastEventType = '';
+                    continue;
+                }
+
+                // Handle stats events from the tool loop
+                if (lastEventType === 'stats') {
+                    lastEventType = '';
+                    try {
+                        const stats = JSON.parse(data);
+                        state.lastLiveStats = stats;
+                        updateLiveStats(stats);
+                    } catch { /* skip */ }
+                    continue;
+                }
+
+                lastEventType = '';
 
                 try {
                     const parsed = JSON.parse(data);
@@ -355,6 +414,8 @@ async function streamResponse(response) {
     } finally {
         // Final render
         flushContent();
+        // Refresh stats after stream ends
+        fetchStats();
         try { reader.releaseLock(); } catch {}
     }
 }
@@ -557,6 +618,246 @@ function formatFileSize(bytes) {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Settings Modal ───────────────────────────────────────────────
+
+function initSettingsModal() {
+    // Open
+    dom.settingsBtn.addEventListener('click', openSettings);
+    // Close
+    dom.settingsCloseBtn.addEventListener('click', closeSettings);
+    dom.settingsOverlay.addEventListener('click', (e) => {
+        if (e.target === dom.settingsOverlay) closeSettings();
+    });
+    // Save
+    dom.settingsSaveBtn.addEventListener('click', saveSettings);
+
+    // Provider toggle: show/hide SearXNG URL
+    const providerSelect = $('#cfg-search-provider');
+    const searxngGroup = $('#cfg-searxng-group');
+    providerSelect.addEventListener('change', () => {
+        searxngGroup.style.display =
+            providerSelect.value === 'searxng' ? '' : 'none';
+    });
+
+    // Escape key
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !dom.settingsOverlay.classList.contains('hidden')) {
+            closeSettings();
+        }
+    });
+}
+
+async function openSettings() {
+    dom.settingsOverlay.classList.remove('hidden');
+    dom.settingsStatus.textContent = 'Loading…';
+
+    try {
+        const resp = await fetch('/v1/config');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const cfg = data.config || {};
+
+        // Populate form
+        $('#cfg-lm-studio-url').value = cfg.lm_studio_url || '';
+        $('#cfg-timeout').value = cfg.lm_studio_timeout || 120;
+        $('#cfg-search-provider').value = cfg.search_provider || 'searxng';
+        $('#cfg-searxng-url').value = cfg.searxng_url || '';
+        $('#cfg-search-api-key').value = cfg.search_api_key || '';
+        $('#cfg-max-iterations').value = cfg.max_tool_loop_iterations || 10;
+        $('#cfg-max-client-tools').value = cfg.max_client_tools || 12;
+        $('#cfg-max-results').value = cfg.max_search_results || 5;
+
+        // Show/hide SearXNG URL based on provider
+        $('#cfg-searxng-group').style.display =
+            (cfg.search_provider || 'searxng') === 'searxng' ? '' : 'none';
+
+        dom.settingsStatus.textContent = '';
+    } catch (err) {
+        dom.settingsStatus.textContent = `Failed to load: ${err.message}`;
+        dom.settingsStatus.style.color = 'var(--danger)';
+    }
+}
+
+function closeSettings() {
+    dom.settingsOverlay.classList.add('hidden');
+}
+
+async function saveSettings() {
+    dom.settingsStatus.textContent = 'Saving…';
+    dom.settingsStatus.style.color = 'var(--accent)';
+
+    const body = {
+        lm_studio_url: $('#cfg-lm-studio-url').value.trim() || undefined,
+        lm_studio_timeout: parseFloat($('#cfg-timeout').value) || undefined,
+        search_provider: $('#cfg-search-provider').value || undefined,
+        searxng_url: $('#cfg-searxng-url').value.trim() || undefined,
+        search_api_key: $('#cfg-search-api-key').value || undefined,
+        max_tool_loop_iterations: parseInt($('#cfg-max-iterations').value) || undefined,
+        max_client_tools: parseInt($('#cfg-max-client-tools').value) || undefined,
+        max_search_results: parseInt($('#cfg-max-results').value) || undefined,
+    };
+
+    // Remove undefined values
+    Object.keys(body).forEach(k => { if (body[k] === undefined) delete body[k]; });
+
+    try {
+        const resp = await fetch('/v1/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const changed = data.changed || {};
+        const keys = Object.keys(changed);
+        if (keys.length === 0) {
+            dom.settingsStatus.textContent = 'No changes.';
+        } else {
+            dom.settingsStatus.textContent = `Updated: ${keys.join(', ')}`;
+            dom.settingsStatus.style.color = '#2e7d32';
+
+            // If LM Studio URL changed, refresh models
+            if ('lm_studio_url' in changed) {
+                await loadModels();
+            }
+        }
+    } catch (err) {
+        dom.settingsStatus.textContent = `Save failed: ${err.message}`;
+        dom.settingsStatus.style.color = 'var(--danger)';
+    }
+}
+
+// ── Performance Stats Panel ─────────────────────────────────────
+
+function initStatsPanel() {
+    // Toggle sidebar
+    dom.statsToggleBtn.addEventListener('click', toggleStatsPanel);
+    dom.statsCloseBtn.addEventListener('click', () => {
+        if (state.statsVisible) toggleStatsPanel();
+    });
+}
+
+function toggleStatsPanel() {
+    state.statsVisible = !state.statsVisible;
+    if (state.statsVisible) {
+        dom.statsPanel.classList.remove('collapsed');
+        dom.statsToggleBtn.classList.add('active');
+        fetchStats(); // immediate refresh
+    } else {
+        dom.statsPanel.classList.add('collapsed');
+        dom.statsToggleBtn.classList.remove('active');
+    }
+}
+
+function startStatsPolling() {
+    // Poll /stats every 3 seconds
+    state.statsPollInterval = setInterval(fetchStats, 3000);
+}
+
+async function fetchStats() {
+    try {
+        const resp = await fetch('/stats');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        dom.statRequests.textContent = data.total_requests || 0;
+        dom.statUptime.textContent = formatUptime(data.uptime_seconds || 0);
+        dom.statSearches.textContent = data.total_searches || 0;
+        dom.statFetches.textContent = data.total_fetch_pages || 0;
+        dom.statPassthrough.textContent = data.total_passthrough_tools || 0;
+        dom.statHallucinated.textContent = data.total_hallucinated_tools || 0;
+
+        // LLM stats
+        dom.statLlmCalls.textContent = data.llm_call_count || 0;
+        if (data.llm_avg_ms > 0) {
+            dom.statLlmAvg.textContent = formatMs(data.llm_avg_ms);
+        }
+
+        // Token stats
+        if (data.prompt_tokens_per_second > 0) {
+            dom.statPromptTps.textContent = Math.round(data.prompt_tokens_per_second) + ' t/s';
+        } else {
+            dom.statPromptTps.textContent = '—';
+        }
+        if (data.tokens_per_second > 0) {
+            dom.statGenTps.textContent = Math.round(data.tokens_per_second) + ' t/s';
+        } else {
+            dom.statGenTps.textContent = '—';
+        }
+        const pt = data.total_prompt_tokens || 0;
+        const ct = data.total_completion_tokens || 0;
+        if (pt > 0 || ct > 0) {
+            dom.statTokens.textContent = `${pt.toLocaleString()} / ${ct.toLocaleString()}`;
+        } else {
+            dom.statTokens.textContent = '—';
+        }
+
+        // Cache
+        if (data.cache_hit_rate !== undefined) {
+            dom.statCacheRate.textContent = (data.cache_hit_rate * 100).toFixed(0) + '%';
+        }
+        dom.statCacheDetail.textContent = `${data.cache_hits || 0} / ${data.cache_misses || 0}`;
+    } catch {
+        // Silently ignore — server might be busy
+    }
+}
+
+function updateLiveStats(stats) {
+    if (!stats) {
+        dom.statLiveContent.innerHTML = '<span class="stat-idle">Waiting for next request…</span>';
+        return;
+    }
+
+    dom.statLlmLast.textContent = stats.last_llm_ms > 0 ? formatMs(stats.last_llm_ms) : '—';
+    if (stats.tokens_per_second > 0) {
+        dom.statGenTps.textContent = Math.round(stats.tokens_per_second) + ' t/s';
+    }
+    if (stats.prompt_tokens_per_second > 0) {
+        dom.statPromptTps.textContent = Math.round(stats.prompt_tokens_per_second) + ' t/s';
+    }
+    if (stats.prompt_tokens > 0 || stats.completion_tokens > 0) {
+        dom.statTokens.textContent = `${stats.prompt_tokens} / ${stats.completion_tokens}`;
+    }
+
+    let html = '';
+    if (stats.llm_call_count > 0) {
+        html += `<div class="stat-live-row"><span>LLM Calls</span><span>${stats.llm_call_count}</span></div>`;
+        html += `<div class="stat-live-row"><span>Avg Latency</span><span>${formatMs(stats.llm_avg_ms)}</span></div>`;
+    }
+    if (stats.tokens_per_second > 0) {
+        html += `<div class="stat-live-row"><span>Gen Speed</span><span>${Math.round(stats.tokens_per_second)} t/s</span></div>`;
+    }
+    if (stats.prompt_tokens_per_second > 0) {
+        html += `<div class="stat-live-row"><span>Prompt Speed</span><span>${Math.round(stats.prompt_tokens_per_second)} t/s</span></div>`;
+    }
+    if (stats.web_search_count > 0) {
+        html += `<div class="stat-live-row"><span>Searches</span><span>${stats.web_search_count}</span></div>`;
+    }
+    if (stats.fetch_page_count > 0) {
+        html += `<div class="stat-live-row"><span>Pages Fetched</span><span>${stats.fetch_page_count}</span></div>`;
+    }
+    if (stats.hallucinated_tool_count > 0) {
+        html += `<div class="stat-live-row"><span>Blocked</span><span>${stats.hallucinated_tool_count}</span></div>`;
+    }
+    if (stats.total_iterations > 0) {
+        html += `<div class="stat-live-row"><span>Iterations</span><span>${stats.total_iterations}</span></div>`;
+    }
+    dom.statLiveContent.innerHTML = html || '<span class="stat-idle">Streaming…</span>';
+}
+
+function formatMs(ms) {
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+}
+
+function formatUptime(seconds) {
+    if (seconds < 60) return Math.round(seconds) + 's';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h}h ${m}m`;
 }
 
 // ── UI Helpers ───────────────────────────────────────────────────
