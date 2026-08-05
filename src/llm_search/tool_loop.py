@@ -716,7 +716,10 @@ async def run_tool_loop_streaming(
                 finish_reason = choices[0].get("finish_reason")
 
                 # ── Text content — relay immediately ────────────
-                text = delta.get("content") or ""
+                # Reasoning models (Qwen3.6, DeepSeek-R1, etc.) emit
+                # reasoning_content instead of content. Capture either
+                # so the user sees text, not a blank screen.
+                text = delta.get("content") or delta.get("reasoning_content") or ""
                 if text:
                     if not had_role:
                         had_role = True

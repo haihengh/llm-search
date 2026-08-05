@@ -392,8 +392,11 @@ async function streamResponse(response) {
                 try {
                     const parsed = JSON.parse(data);
                     const delta = parsed.choices?.[0]?.delta;
-                    if (delta?.content) {
-                        assistantMsg.content += delta.content;
+                    // Reasoning models emit reasoning_content instead of content.
+                    // Capture whichever the model provides so text renders on-screen.
+                    const text = delta?.content || delta?.reasoning_content || '';
+                    if (text) {
+                        assistantMsg.content += text;
                     }
 
                     // Throttle markdown rendering
