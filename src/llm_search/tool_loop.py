@@ -811,6 +811,14 @@ async def run_tool_loop_streaming(
             total_text = "".join(content_parts)
             if total_text:
                 stats.completion_tokens += max(1, len(total_text) // 4)
+            # Estimate prompt tokens from the conversation sent to the LLM.
+            # Rough but gives useful prompt_tokens_per_second even when the
+            # backend doesn't return usage in streaming mode.
+            if stats.prompt_tokens == 0:
+                prompt_chars = sum(
+                    len(str(m.get("content", ""))) for m in conversation
+                )
+                stats.prompt_tokens = max(1, prompt_chars // 4)
 
             logger.info(
                 "Streaming iteration %d done: %d chunks, %d text chars, "

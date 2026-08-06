@@ -846,14 +846,16 @@ function updateLiveStats(stats) {
     }
 
     dom.statLlmLast.textContent = stats.last_llm_ms > 0 ? formatMs(stats.last_llm_ms) : '—';
-    if (stats.tokens_per_second > 0) {
-        dom.statGenTps.textContent = Math.round(stats.tokens_per_second) + ' t/s';
-    }
-    if (stats.prompt_tokens_per_second > 0) {
-        dom.statPromptTps.textContent = Math.round(stats.prompt_tokens_per_second) + ' t/s';
-    }
+    dom.statGenTps.textContent = stats.tokens_per_second > 0
+        ? Math.round(stats.tokens_per_second) + ' t/s'
+        : '—';
+    dom.statPromptTps.textContent = stats.prompt_tokens_per_second > 0
+        ? Math.round(stats.prompt_tokens_per_second) + ' t/s'
+        : '—';
     if (stats.prompt_tokens > 0 || stats.completion_tokens > 0) {
         dom.statTokens.textContent = `${stats.prompt_tokens} / ${stats.completion_tokens}`;
+    } else {
+        dom.statTokens.textContent = '—';
     }
 
     let html = '';
