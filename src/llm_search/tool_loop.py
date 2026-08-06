@@ -65,6 +65,26 @@ def is_context_overflow(exc: LMStudioError) -> bool:
     return any(marker in msg for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
+# ── Reasoning Toggle ──────────────────────────────────────────
+
+_NO_REASONING_PROMPT = (
+    "You are in direct-answer mode. Do NOT use reasoning, chain of thought, "
+    "or step-by-step thinking. Answer concisely and directly — give only "
+    "the final answer with no preamble, no thinking process, and no "
+    "explanation of your reasoning."
+)
+
+
+def _inject_no_reasoning_prompt(conversation: list[dict[str, Any]]) -> None:
+    """Prepend or extend a system message to disable reasoning."""
+    if conversation and conversation[0].get("role") == "system":
+        conversation[0]["content"] = (
+            conversation[0]["content"] + "\n\n" + _NO_REASONING_PROMPT
+        )
+    else:
+        conversation.insert(0, {"role": "system", "content": _NO_REASONING_PROMPT})
+
+
 # ── Stats Collector ────────────────────────────────────────────
 
 @dataclass
@@ -299,6 +319,7 @@ async def run_tool_loop(
     tools: Optional[list[dict[str, Any]]] = None,
     model: str = "local-model",
     lm_studio_url: Optional[str] = None,
+    reasoning: bool = True,
 ) -> dict[str, Any]:
     """Execute the tool-call intercept loop.
 
@@ -370,6 +391,12 @@ async def run_tool_loop(
         client_tool_names = kept_client
 
     conversation = list(messages)  # Copy — we'll mutate this
+
+    # When reasoning is disabled, inject a system prompt telling the
+    # model to skip chain-of-thought and answer directly.
+    if not reasoning:
+        _inject_no_reasoning_prompt(conversation)
+
     total_searches = 0
     total_tool_calls = 0
     stats = ToolLoopStats()
@@ -583,6 +610,7 @@ async def run_tool_loop_streaming(
     model: str = "local-model",
     lm_studio_url: Optional[str] = None,
     stats_out: Optional[list[dict[str, Any]]] = None,
+    reasoning: bool = True,
 ) -> AsyncGenerator[str, None]:
     """Execute the tool-call loop with single-pass streaming on every turn.
 
@@ -648,6 +676,12 @@ async def run_tool_loop_streaming(
         client_tool_names = kept_client
 
     conversation = list(messages)
+
+    # When reasoning is disabled, inject a system prompt telling the
+    # model to skip chain-of-thought and answer directly.
+    if not reasoning:
+        _inject_no_reasoning_prompt(conversation)
+
     total_searches = 0
     total_tool_calls = 0
     relayed_text = False  # True once any text content has been sent to caller
@@ -716,10 +750,19 @@ async def run_tool_loop_streaming(
                 finish_reason = choices[0].get("finish_reason")
 
                 # ── Text content — relay immediately ────────────
-                # Reasoning models (Qwen3.6, DeepSeek-R1, etc.) emit
-                # reasoning_content instead of content. Capture either
-                # so the user sees text, not a blank screen.
-                text = delta.get("content") or delta.get("reasoning_content") or ""
+                # Reasoning models emit reasoning_content (chain-of-thought)
+                # alongside or instead of content. When reasoning is disabled:
+                #   - If the model has produced any content, suppress reasoning
+                #   - If the model ONLY emits reasoning (pure reasoning model),
+                #     show it anyway — otherwise the user sees a blank screen.
+                raw_content = delta.get("content") or ""
+                raw_reasoning = delta.get("reasoning_content") or ""
+                if reasoning:
+                    text = raw_content or raw_reasoning
+                elif raw_content:
+                    text = raw_content
+                else:
+                    text = raw_reasoning  # pure reasoning model fallback
                 if text:
                     if not had_role:
                         had_role = True

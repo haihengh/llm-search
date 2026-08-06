@@ -141,6 +141,7 @@ html, body {
 
 #settings-btn,
 #stats-toggle-btn,
+#reasoning-toggle-btn,
 #clear-btn {
     width: 34px;
     height: 34px;
@@ -157,9 +158,23 @@ html, body {
 }
 
 #settings-btn:hover,
-#stats-toggle-btn:hover {
+#stats-toggle-btn:hover,
+#reasoning-toggle-btn:hover {
     background: var(--bg-tertiary);
     color: var(--text-primary);
+}
+
+#reasoning-toggle-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+#reasoning-toggle-btn.inactive {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    border-color: var(--border);
+    opacity: 0.5;
 }
 
 #stats-toggle-btn.active {
@@ -1029,7 +1044,7 @@ html, body {
 
     #input-area {
         padding: 8px 10px;
-        padding-bottom: calc(env(safe-area-inset-bottom, 10px) + 12px);
+        padding-bottom: calc(env(safe-area-inset-bottom, 24px) + 20px);
     }
 
     #input-row {
@@ -1080,7 +1095,8 @@ html, body {
         font-size: 11px;
     }
 
-    #clear-btn {
+    #clear-btn,
+    #reasoning-toggle-btn {
         width: 30px;
         height: 30px;
     }

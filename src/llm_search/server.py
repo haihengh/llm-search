@@ -181,6 +181,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    reasoning: bool = True  # if False, skip reasoning_content, relay only content
 
 
 class ChatResponseChoice(BaseModel):
@@ -327,6 +328,7 @@ async def chat_completions(request: Request, body: ChatRequest):
                     tools=body.tools,
                     model=body.model,
                     stats_out=stats_container,
+                    reasoning=body.reasoning,
                 ):
                     yield chunk
             except Exception:
@@ -357,6 +359,7 @@ async def chat_completions(request: Request, body: ChatRequest):
             search_provider=get_search_provider(),
             tools=body.tools,
             model=body.model,
+            reasoning=body.reasoning,
         )
     except LMStudioError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

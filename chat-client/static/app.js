@@ -19,6 +19,7 @@ const state = {
     statsVisible: false,
     lastLiveStats: null,    // from SSE event: stats
     statsPollInterval: null,
+    reasoningEnabled: true,  // 🧠 reasoning toggle
 };
 
 // ── DOM refs ─────────────────────────────────────────────────────
@@ -37,6 +38,7 @@ const dom = {
     fileInput: $('#file-input'),
     modelSelect: $('#model-select'),
     clearBtn: $('#clear-btn'),
+    reasoningToggleBtn: $('#reasoning-toggle-btn'),
     imagePreview: $('#image-preview'),
     imagePreviewImg: $('#image-preview-img'),
     removeImageBtn: $('#remove-image-btn'),
@@ -76,6 +78,7 @@ const dom = {
 
 async function init() {
     configureMarked();
+    initReasoningToggle();
     initEventListeners();
     initSettingsModal();
     initStatsPanel();
@@ -260,6 +263,7 @@ async function sendMessage() {
             content: m.content,
         })),
         stream: true,
+        reasoning: state.reasoningEnabled,
     };
 
     state.abortController = new AbortController();
@@ -621,6 +625,34 @@ function formatFileSize(bytes) {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Reasoning Toggle ────────────────────────────────────────────
+
+function initReasoningToggle() {
+    // Load saved preference (default: true / enabled)
+    const saved = localStorage.getItem('reasoningEnabled');
+    if (saved !== null) {
+        state.reasoningEnabled = saved !== 'false';
+    }
+    updateReasoningButton();
+
+    dom.reasoningToggleBtn.addEventListener('click', () => {
+        state.reasoningEnabled = !state.reasoningEnabled;
+        localStorage.setItem('reasoningEnabled', state.reasoningEnabled);
+        updateReasoningButton();
+    });
+}
+
+function updateReasoningButton() {
+    const btn = dom.reasoningToggleBtn;
+    if (state.reasoningEnabled) {
+        btn.className = 'active';
+        btn.title = 'Reasoning: ON (click to disable chain of thought)';
+    } else {
+        btn.className = 'inactive';
+        btn.title = 'Reasoning: OFF (click to enable chain of thought)';
+    }
 }
 
 // ── Settings Modal ───────────────────────────────────────────────
