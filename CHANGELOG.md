@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-05
+
+### Added
+- **Reasoning toggle (🧠)** — header button to enable/disable chain-of-thought. When off, the middleware injects a system prompt telling the model to answer directly and suppresses `reasoning_content` if the model also produces `content`. Pure reasoning models fall back to showing reasoning so the screen is never blank. State persisted to `localStorage`.
+- **Prompt token estimation for streaming** — LM Studio doesn't stream `usage`, so prompt tokens are now estimated from conversation length (`chars ÷ 4`) matching the completion-token heuristic. This gives meaningful prompt_tokens_per_second in the stats panel even for streaming-only workloads.
+
+### Fixed
+- **Blank screen on reasoning models** — both `tool_loop.py` and `app.js` now capture `delta.reasoning_content` in addition to `delta.content`, so Qwen3.6/DeepSeek-R1 style models render text instead of a blank page.
+- **Stats fields stuck at "—"** — `updateLiveStats()` now always resets token speed fields (was only writing on `> 0`, leaving stale values).
+- **Mobile input bar bottom padding** — increased from 22px to 44px so the input doesn't sit at the screen edge.
+
 ## [0.3.0] — 2026-08-05
 
 ### Added
@@ -168,5 +179,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2
 [0.2.5]: https://github.com/haihengh/llm-search/compare/v0.2.4...v0.2.5
+[0.3.1]: https://github.com/haihengh/llm-search/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/haihengh/llm-search/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/haihengh/llm-search/compare/v0.2.7...v0.2.8
