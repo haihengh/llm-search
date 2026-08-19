@@ -403,9 +403,21 @@ async def anthropic_stream_from_openai(
             if fr is not None:
                 finish_reason = fr
 
+    # ── Close the text block ──────────────────────────────────────
+    # Anthropic content blocks are strictly sequential: a block must be
+    # closed before the next one opens. This has to happen before any
+    # tool_use blocks are emitted, or the stream nests block 1 inside
+    # block 0 and SDK accumulators attribute events to the wrong block.
+    if text_block_open:
+        yield _sse_evt("content_block_stop", {
+            "type": "content_block_stop",
+            "index": text_block_index,
+        })
+        text_block_open = False
+
     # ── Emit pending tool_use blocks ──────────────────────────────
-    # These are unrecognised tool calls the middleware passed through
-    # (e.g. a Claude-distilled model hallucinating read/bash/write).
+    # These are client tools the middleware passed through (Claude Code's
+    # Read/Bash/Edit and friends).
     for tc in pending_tool_calls:
         if not has_msg_start:
             has_msg_start = True
@@ -418,27 +430,31 @@ async def anthropic_stream_from_openai(
                     "usage": {"input_tokens": 0, "output_tokens": 0},
                 },
             })
-        # Parse arguments for the tool_use input
         func = tc.get("function", {})
+        # _validate_openai_tool_call guarantees this is a valid JSON string.
         raw_args = func.get("arguments", "{}")
-        if isinstance(raw_args, str):
-            try:
-                tool_input = json_mod.loads(raw_args)
-            except json_mod.JSONDecodeError:
-                tool_input = {}
-        else:
-            tool_input = raw_args
+        if not isinstance(raw_args, str):
+            raw_args = json.dumps(raw_args, ensure_ascii=False)
 
-        block = {
-            "type": "tool_use",
-            "id": tc.get("id", ""),
-            "name": func.get("name", ""),
-            "input": tool_input,
-        }
+        # content_block_start carries an EMPTY input; the arguments arrive
+        # as input_json_delta chunks that the client concatenates and
+        # parses. Clients that build tool input from those deltas see an
+        # empty object if we only put it in the start event — which is how
+        # a correct tool call turns into "Read called with no file_path".
         yield _sse_evt("content_block_start", {
             "type": "content_block_start",
             "index": next_block_index,
-            "content_block": block,
+            "content_block": {
+                "type": "tool_use",
+                "id": tc.get("id", ""),
+                "name": func.get("name", ""),
+                "input": {},
+            },
+        })
+        yield _sse_evt("content_block_delta", {
+            "type": "content_block_delta",
+            "index": next_block_index,
+            "delta": {"type": "input_json_delta", "partial_json": raw_args},
         })
         yield _sse_evt("content_block_stop", {
             "type": "content_block_stop",
@@ -446,13 +462,6 @@ async def anthropic_stream_from_openai(
         })
         next_block_index += 1
         finish_reason = "tool_calls"
-
-    # ── Close the text block ──────────────────────────────────────
-    if text_block_open:
-        yield _sse_evt("content_block_stop", {
-            "type": "content_block_stop",
-            "index": text_block_index,
-        })
 
     # ── Emit closing events ───────────────────────────────────────
     if has_msg_start:

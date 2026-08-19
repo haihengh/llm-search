@@ -24,7 +24,12 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
         "description": (
             "Search the internet for current, up-to-date information. "
             "Use this whenever you need facts, news, or knowledge beyond "
-            "your training cutoff date."
+            "your training cutoff date. "
+            "IMPORTANT: After receiving search results, if you have enough "
+            "information to answer the user's question, respond directly — "
+            "do NOT call web_search again with the same or a similar query. "
+            "Only search again if you need genuinely DIFFERENT information "
+            "than what the results already provide."
         ),
         "parameters": {
             "type": "object",

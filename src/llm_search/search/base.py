@@ -43,7 +43,14 @@ def format_results_for_llm(results: list[SearchResult]) -> str:
     Compact and token-efficient: just position, title, URL, snippet.
     """
     if not results:
-        return "No search results found."
+        return (
+            "No search results found for this query. "
+            "Try a different search term or rephrase the question."
+        )
 
     formatted = [r.to_llm_format() for r in results]
-    return "Search results:\n\n" + "\n".join(formatted)
+    return (
+        "Search results:\n\n" + "\n".join(formatted) +
+        "\n(If the information above is sufficient to answer "
+        "the user's question, respond directly.)"
+    )

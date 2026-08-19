@@ -329,6 +329,7 @@ async def chat_completions(request: Request, body: ChatRequest):
                     model=body.model,
                     stats_out=stats_container,
                     reasoning=body.reasoning,
+                    max_tokens=body.max_tokens,
                 ):
                     yield chunk
             except Exception:
@@ -360,6 +361,7 @@ async def chat_completions(request: Request, body: ChatRequest):
             tools=body.tools,
             model=body.model,
             reasoning=body.reasoning,
+            max_tokens=body.max_tokens,
         )
     except LMStudioError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
@@ -472,6 +474,13 @@ async def messages(request: Request):
                 tools=openai_req["tools"],
                 model=openai_req["model"],
                 stats_out=stats_container,
+                # Never surface chain-of-thought as assistant text here.
+                # Anthropic clients render whatever text arrives as the
+                # reply, so relaying the model's private deliberation makes
+                # lines like "I'm hitting a wall with tool calls" look like
+                # an answer. The model still thinks — we just don't ship it.
+                relay_reasoning=False,
+                max_tokens=openai_req.get("max_tokens"),
             )
             stream_gen = anthropic_stream_from_openai(
                 tool_loop_gen, model=model, request_id=chatcmpl_id,
@@ -554,6 +563,7 @@ async def messages(request: Request):
             search_provider=get_search_provider(),
             tools=openai_req["tools"],
             model=openai_req["model"],
+            max_tokens=openai_req.get("max_tokens"),
         )
 
         _total_searches += result.get("searches", 0)
@@ -634,6 +644,8 @@ async def responses_api(request: Request):
             tools=openai_req["tools"],
             model=openai_req["model"],
             stats_out=stats_container,
+            relay_reasoning=False,  # see /v1/messages — CoT is not the reply
+            max_tokens=openai_req.get("max_tokens"),
         )
         stream_gen = responses_stream_from_tool_loop(
             tool_loop_gen, model=model, resp_id=resp_id,
@@ -702,6 +714,7 @@ async def responses_api(request: Request):
             search_provider=get_search_provider(),
             tools=openai_req["tools"],
             model=openai_req["model"],
+            max_tokens=openai_req.get("max_tokens"),
         )
     except LMStudioError as exc:
         # Responses-shaped error

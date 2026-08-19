@@ -158,6 +158,8 @@ def responses_request_to_openai(body: dict[str, Any]) -> dict[str, Any]:
         "messages": openai_messages,
         "tools": openai_tools,
         "model": body.get("model", "local-model"),
+        # Responses API calls this max_output_tokens; accept either spelling.
+        "max_tokens": body.get("max_output_tokens") or body.get("max_tokens"),
     }
 
 

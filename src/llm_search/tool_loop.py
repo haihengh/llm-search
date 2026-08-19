@@ -190,6 +190,7 @@ async def call_lm_studio(
     tools: list[dict[str, Any]],
     model: str,
     lm_studio_url: str,
+    max_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
     """Send a chat completion request to LM Studio.
 
@@ -203,6 +204,8 @@ async def call_lm_studio(
     }
     if tools:
         payload["tools"] = tools
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
 
     timeout = runtime_config.lm_studio_timeout
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -233,6 +236,7 @@ async def call_lm_studio_streaming(
     tools: list[dict[str, Any]],
     model: str,
     lm_studio_url: str,
+    max_tokens: Optional[int] = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Send a streaming chat completion request to LM Studio.
 
@@ -250,6 +254,8 @@ async def call_lm_studio_streaming(
     }
     if tools:
         payload["tools"] = tools
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
 
     timeout = runtime_config.lm_studio_timeout
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -320,6 +326,7 @@ async def run_tool_loop(
     model: str = "local-model",
     lm_studio_url: Optional[str] = None,
     reasoning: bool = True,
+    max_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
     """Execute the tool-call intercept loop.
 
@@ -401,21 +408,39 @@ async def run_tool_loop(
     total_tool_calls = 0
     stats = ToolLoopStats()
 
+    # Track seen queries / URLs so we can tell the model when it's
+    # repeating itself instead of silently re-executing the same search.
+    seen_queries: set[str] = set()
+    seen_urls: set[str] = set()
+
     for iteration in range(1, max_iter + 1):
         logger.debug("Tool loop iteration %d/%d", iteration, max_iter)
 
-        # On later iterations, nudge the LLM to synthesize an answer
-        # instead of searching again. Small local models sometimes get
-        # stuck in a search → search → search loop without this reminder.
-        if iteration >= max_iter - 1 and total_searches > 0:
-            conversation.append({
-                "role": "user",
-                "content": (
-                    "You now have search results. Please synthesize a "
-                    "final answer based on what you found. Do NOT call "
-                    "web_search again — answer the user's question now."
-                ),
-            })
+        # Nudge the LLM to synthesize an answer instead of searching
+        # again. Small local models often get stuck in a search→search→search
+        # loop without these reminders.
+        #   - Iteration 3: gentle hint (still early, may need more searches)
+        #   - Last 2 iterations: forceful "stop searching now"
+        if total_searches > 0:
+            if iteration == 3 and iteration < max_iter - 1:
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        "You now have search results. If the information is "
+                        "sufficient to answer the user's question, please "
+                        "respond directly instead of searching again. Only "
+                        "search again if you need completely different information."
+                    ),
+                })
+            elif iteration >= max_iter - 1:
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        "You now have search results. Please synthesize a "
+                        "final answer based on what you found. Do NOT call "
+                        "web_search again — answer the user's question now."
+                    ),
+                })
 
         # Send to LM Studio
         t0 = time.monotonic()
@@ -424,6 +449,7 @@ async def run_tool_loop(
             tools=all_tools,
             model=model,
             lm_studio_url=url,
+            max_tokens=max_tokens,
         )
         stats.record_llm_call((time.monotonic() - t0) * 1000)
         stats.record_token_usage(
@@ -493,20 +519,51 @@ async def run_tool_loop(
 
             logger.info("Tool call: %s(%s)", tool_name, arguments)
 
-            # Track searches
+            # ── Duplicate detection ──────────────────────────
+            # If the model repeats the exact same query or URL, tell it
+            # the results are already in the conversation instead of
+            # re-executing (and returning byte-identical cached results).
+            dedup_key: str | None = None
             if tool_name == WEB_SEARCH:
-                total_searches += 1
-                stats.web_search_count += 1
+                dedup_key = arguments.get("query", "").strip().lower()
             elif tool_name == FETCH_PAGE:
-                stats.fetch_page_count += 1
-            total_tool_calls += 1
+                dedup_key = arguments.get("url", "").strip().lower()
 
-            # Execute the tool
-            result_text = await dispatch_tool(
-                tool_name=tool_name,
-                arguments=arguments,
-                search_provider=search_provider,
-            )
+            if dedup_key and (
+                (tool_name == WEB_SEARCH and dedup_key in seen_queries)
+                or (tool_name == FETCH_PAGE and dedup_key in seen_urls)
+            ):
+                result_text = (
+                    f"You already searched for this — the results are "
+                    f"earlier in this conversation. Use them to answer "
+                    f"the user. If you need DIFFERENT information, try "
+                    f"a more specific or alternative query."
+                )
+                logger.info(
+                    "Duplicate %s blocked: %r — fed hint to LLM",
+                    tool_name, dedup_key,
+                )
+            else:
+                # Track the query / URL before executing
+                if dedup_key and tool_name == WEB_SEARCH:
+                    seen_queries.add(dedup_key)
+                elif dedup_key and tool_name == FETCH_PAGE:
+                    seen_urls.add(dedup_key)
+
+                # Track searches
+                if tool_name == WEB_SEARCH:
+                    total_searches += 1
+                    stats.web_search_count += 1
+                elif tool_name == FETCH_PAGE:
+                    stats.fetch_page_count += 1
+
+                # Execute the tool
+                result_text = await dispatch_tool(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    search_provider=search_provider,
+                )
+            total_tool_calls += 1
 
             # Append tool result to conversation
             tool_message = {
@@ -611,6 +668,8 @@ async def run_tool_loop_streaming(
     lm_studio_url: Optional[str] = None,
     stats_out: Optional[list[dict[str, Any]]] = None,
     reasoning: bool = True,
+    relay_reasoning: Optional[bool] = None,
+    max_tokens: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """Execute the tool-call loop with single-pass streaming on every turn.
 
@@ -630,12 +689,31 @@ async def run_tool_loop_streaming(
     so the caller can aggregate per-request metrics without parsing the
     stream.
 
+    Two independent reasoning switches:
+      *reasoning*        — whether the model should think at all. When
+                           False a system prompt tells it to skip
+                           chain-of-thought entirely.
+      *relay_reasoning*  — whether any ``reasoning_content`` the model
+                           does emit is streamed to the caller as text.
+                           Defaults to *reasoning*. API clients (Anthropic
+                           / Responses) pass False: chain-of-thought is
+                           deliberation, not assistant speech, and showing
+                           it as the reply makes the model's private
+                           "let me step back and rethink" monologue look
+                           like its answer.
+
+    Chain-of-thought is never written into the conversation history
+    regardless of these flags — feeding it back makes the model treat
+    its own thinking as statements it already made out loud.
+
     Yields:
         SSE-formatted strings: ``data: {json}\\n\\n`` per chunk.
         Terminates with ``data: [DONE]\\n\\n``.
     """
     url = lm_studio_url or runtime_config.lm_studio_url
     max_iter = runtime_config.max_tool_loop_iterations
+    if relay_reasoning is None:
+        relay_reasoning = reasoning
 
     # Merge client-provided tools with auto-injected search tools.
     # The LLM sees client tools + web_search + fetch_page. To prevent
@@ -687,6 +765,11 @@ async def run_tool_loop_streaming(
     relayed_text = False  # True once any text content has been sent to caller
     stats = ToolLoopStats()
 
+    # Track seen queries / URLs so we can tell the model when it's
+    # repeating itself instead of silently re-executing the same search.
+    seen_queries: set[str] = set()
+    seen_urls: set[str] = set()
+
     def _sse(data: dict[str, Any]) -> str:
         """Format a dict as an SSE data event."""
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -717,20 +800,36 @@ async def run_tool_loop_streaming(
         for iteration in range(1, max_iter + 1):
             logger.debug("Tool loop (streaming) iteration %d/%d", iteration, max_iter)
 
-            # On later iterations, nudge the LLM to answer
-            if iteration >= max_iter - 1 and total_searches > 0:
-                conversation.append({
-                    "role": "user",
-                    "content": (
-                        "You now have search results. Please synthesize a "
-                        "final answer based on what you found. Do NOT call "
-                        "web_search again — answer the user's question now."
-                    ),
-                })
+            # Nudge the LLM to synthesize an answer instead of searching
+            # again. Small local models often get stuck in a search→search→search
+            # loop without these reminders.
+            #   - Iteration 3: gentle hint (still early, may need more searches)
+            #   - Last 2 iterations: forceful "stop searching now"
+            if total_searches > 0:
+                if iteration == 3 and iteration < max_iter - 1:
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "You now have search results. If the information is "
+                            "sufficient to answer the user's question, please "
+                            "respond directly instead of searching again. Only "
+                            "search again if you need completely different information."
+                        ),
+                    })
+                elif iteration >= max_iter - 1:
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "You now have search results. Please synthesize a "
+                            "final answer based on what you found. Do NOT call "
+                            "web_search again — answer the user's question now."
+                        ),
+                    })
 
             # ── Single-pass streaming call ──────────────────────
             had_role = False
-            content_parts: list[str] = []
+            content_parts: list[str] = []      # real answer text
+            reasoning_parts: list[str] = []    # chain-of-thought, never history
             tool_fragments: dict[int, dict[str, Any]] = {}
             chunk_count = 0
             t0 = time.monotonic()
@@ -740,6 +839,7 @@ async def run_tool_loop_streaming(
                 tools=all_tools,
                 model=model,
                 lm_studio_url=url,
+                max_tokens=max_tokens,
             ):
                 chunk_count += 1
                 choices = chunk.get("choices", [])
@@ -751,29 +851,36 @@ async def run_tool_loop_streaming(
 
                 # ── Text content — relay immediately ────────────
                 # Reasoning models emit reasoning_content (chain-of-thought)
-                # alongside or instead of content. When reasoning is disabled:
-                #   - If the model has produced any content, suppress reasoning
-                #   - If the model ONLY emits reasoning (pure reasoning model),
-                #     show it anyway — otherwise the user sees a blank screen.
+                # alongside or instead of content. The two are kept strictly
+                # apart: only `content` is the assistant's actual reply, and
+                # only `content` is eligible to enter the conversation history.
                 raw_content = delta.get("content") or ""
                 raw_reasoning = delta.get("reasoning_content") or ""
-                if reasoning:
-                    text = raw_content or raw_reasoning
-                elif raw_content:
-                    text = raw_content
-                else:
-                    text = raw_reasoning  # pure reasoning model fallback
-                if text:
+
+                # Chain-of-thought — relayed only when the caller opted in.
+                if raw_reasoning:
+                    reasoning_parts.append(raw_reasoning)
+                    if relay_reasoning:
+                        if not had_role:
+                            had_role = True
+                            if relayed_text:
+                                # Previous iteration already emitted content;
+                                # insert a separator so answers don't run together.
+                                yield _chunk_sse({"content": "\n\n"})
+                            else:
+                                yield _chunk_sse({"role": "assistant"})
+                        yield _chunk_sse({"content": raw_reasoning})
+
+                # Actual answer text — always relayed.
+                if raw_content:
                     if not had_role:
                         had_role = True
                         if relayed_text:
-                            # Previous iteration already emitted content;
-                            # insert a separator so answers don't run together.
                             yield _chunk_sse({"content": "\n\n"})
                         else:
                             yield _chunk_sse({"role": "assistant"})
-                    content_parts.append(text)
-                    yield _chunk_sse({"content": text})
+                    content_parts.append(raw_content)
+                    yield _chunk_sse({"content": raw_content})
 
                 # ── Tool-call fragments — accumulate ─────────────
                 delta_tcs = delta.get("tool_calls")
@@ -808,9 +915,13 @@ async def run_tool_loop_streaming(
 
             # LM Studio doesn't stream `usage` — estimate tokens from
             # accumulated text (chars ÷ 4 ≈ tokens is standard heuristic).
-            total_text = "".join(content_parts)
-            if total_text:
-                stats.completion_tokens += max(1, len(total_text) // 4)
+            # Reasoning counts toward generation cost even when it is not
+            # relayed, so both go into the token estimate.
+            answer_text = "".join(content_parts)
+            thinking_text = "".join(reasoning_parts)
+            generated_text = answer_text + thinking_text
+            if generated_text:
+                stats.completion_tokens += max(1, len(generated_text) // 4)
             # Estimate prompt tokens from the conversation sent to the LLM.
             # Rough but gives useful prompt_tokens_per_second even when the
             # backend doesn't return usage in streaming mode.
@@ -821,10 +932,12 @@ async def run_tool_loop_streaming(
                 stats.prompt_tokens = max(1, prompt_chars // 4)
 
             logger.info(
-                "Streaming iteration %d done: %d chunks, %d text chars, "
-                "%d tool-call fragments, finish_reason not None",
+                "Streaming iteration %d done: %d chunks, %d answer chars, "
+                "%d reasoning chars (relayed=%s), %d tool-call fragments",
                 iteration, chunk_count,
-                len(total_text),
+                len(answer_text),
+                len(thinking_text),
+                relay_reasoning,
                 len(tool_fragments),
             )
 
@@ -848,7 +961,24 @@ async def run_tool_loop_streaming(
 
             # ── No tool calls — answer is complete ──────────────
             if not assembled_tool_calls:
-                if not content_parts:
+                if content_parts or had_role:
+                    # Something was already relayed (answer text, or
+                    # chain-of-thought the caller asked to see).
+                    yield _chunk_sse({}, "stop")
+                elif thinking_text:
+                    # The model produced only chain-of-thought and we
+                    # suppressed it, so nothing has been sent. A blank reply
+                    # is worse than the thinking itself — relay it, but say
+                    # so in the logs since it means the model never closed
+                    # its reasoning block into a real answer.
+                    logger.warning(
+                        "Model produced %d reasoning chars but no content and "
+                        "no tool calls — relaying reasoning as the answer",
+                        len(thinking_text),
+                    )
+                    yield _chunk_sse({"role": "assistant"})
+                    yield _chunk_sse({"content": thinking_text}, "stop")
+                else:
                     if total_searches > 0:
                         # Model didn't synthesise an answer after searching.
                         # Stream the raw search results as a graceful fallback
@@ -891,8 +1021,6 @@ async def run_tool_loop_streaming(
                             )},
                             "stop",
                         )
-                else:
-                    yield _chunk_sse({}, "stop")
                 stats.total_iterations = iteration
                 yield _stats_sse()
                 yield "data: [DONE]\n\n"
@@ -900,7 +1028,7 @@ async def run_tool_loop_streaming(
                     stats_out.append(stats.to_dict())
                 return
 
-            if content_parts:
+            if had_role:
                 relayed_text = True
 
             # ── Build assistant message for conversation ────────
@@ -954,18 +1082,45 @@ async def run_tool_loop_streaming(
 
                 logger.info("Tool call: %s(%s)", tool_name, arguments)
 
+                # ── Duplicate detection ──────────────────────────
+                dedup_key: str | None = None
                 if tool_name == WEB_SEARCH:
-                    total_searches += 1
-                    stats.web_search_count += 1
+                    dedup_key = arguments.get("query", "").strip().lower()
                 elif tool_name == FETCH_PAGE:
-                    stats.fetch_page_count += 1
-                total_tool_calls += 1
+                    dedup_key = arguments.get("url", "").strip().lower()
 
-                result_text = await dispatch_tool(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    search_provider=search_provider,
-                )
+                if dedup_key and (
+                    (tool_name == WEB_SEARCH and dedup_key in seen_queries)
+                    or (tool_name == FETCH_PAGE and dedup_key in seen_urls)
+                ):
+                    result_text = (
+                        f"You already searched for this — the results are "
+                        f"earlier in this conversation. Use them to answer "
+                        f"the user. If you need DIFFERENT information, try "
+                        f"a more specific or alternative query."
+                    )
+                    logger.info(
+                        "Duplicate %s blocked: %r — fed hint to LLM",
+                        tool_name, dedup_key,
+                    )
+                else:
+                    if dedup_key and tool_name == WEB_SEARCH:
+                        seen_queries.add(dedup_key)
+                    elif dedup_key and tool_name == FETCH_PAGE:
+                        seen_urls.add(dedup_key)
+
+                    if tool_name == WEB_SEARCH:
+                        total_searches += 1
+                        stats.web_search_count += 1
+                    elif tool_name == FETCH_PAGE:
+                        stats.fetch_page_count += 1
+
+                    result_text = await dispatch_tool(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        search_provider=search_provider,
+                    )
+                total_tool_calls += 1
 
                 conversation.append({
                     "role": "tool",
