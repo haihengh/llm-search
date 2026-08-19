@@ -1,9 +1,11 @@
 """Multi-turn probe: tool_use -> tool_result -> follow-up answer, through the middleware."""
 import json
+import sys
+
 import httpx
 
 URL = "http://localhost:8001/v1/messages"
-MODEL = "qwen/qwen3.8-27b"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3.8-27b-claude-opus-reasoning-distilled"
 
 TOOLS = [
     {

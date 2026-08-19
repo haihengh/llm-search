@@ -447,6 +447,13 @@ cp .env.example .env
 
 All configuration via environment variables — see `.env.example` for the full list.
 
+## Diagnosing Tool-Calling Issues
+
+If a client reports broken or hallucinated tool calls (or you just loaded a
+new model and want to confirm it works), use the diagnostic probes in
+[`scripts/probes/`](./scripts/probes/) — see [`docs/probes.md`](./docs/probes.md)
+for what each one checks and how to run it against your running stack.
+
 ## Release Process
 
 Releases follow [Semantic Versioning](https://semver.org/) with a [Keep a Changelog](https://keepachangelog.com/) format.

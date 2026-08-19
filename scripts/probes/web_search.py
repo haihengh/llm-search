@@ -1,10 +1,12 @@
 """Probe: does web_search actually work end-to-end through the middleware
 with the currently loaded LM Studio model?"""
 import json
+import sys
+
 import httpx
 
 URL = "http://localhost:8001/v1/messages"
-MODEL = "qwen/qwen3.8-27b"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3.8-27b-claude-opus-reasoning-distilled"
 
 body = {
     "model": MODEL,

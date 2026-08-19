@@ -27,3 +27,6 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Local agent tooling config
+.abacusai/
