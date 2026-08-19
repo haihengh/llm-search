@@ -1044,7 +1044,7 @@ html, body {
 
     #input-area {
         padding: 8px 10px;
-        padding-bottom: calc(env(safe-area-inset-bottom, 24px) + 20px);
+        padding-bottom: calc(env(safe-area-inset-bottom, 8px) + 8px);
     }
 
     #input-row {
@@ -1119,7 +1119,8 @@ html, body {
     }
 
     #input-area {
-        padding: 6px 8px 8px;
+        padding: 6px 8px;
+        padding-bottom: calc(env(safe-area-inset-bottom, 8px) + 6px);
     }
 
     /* Sidebar overlays on tablet/phone */
