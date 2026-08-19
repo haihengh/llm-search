@@ -465,7 +465,14 @@ async def anthropic_stream_from_openai(
 
     # ── Emit closing events ───────────────────────────────────────
     if has_msg_start:
-        stop_reason = "end_turn" if finish_reason in (None, "stop") else "tool_use"
+        # stop_reason must reflect what was ACTUALLY emitted, not what the
+        # backend claimed via finish_reason. If every tool call this turn
+        # was malformed and got dropped by _validate_openai_tool_call,
+        # pending_tool_calls is empty and no tool_use block was ever sent —
+        # declaring stop_reason "tool_use" here would violate the Anthropic
+        # contract (tool_use with zero tool_use blocks) and confuse the
+        # client's harness.
+        stop_reason = "tool_use" if pending_tool_calls else "end_turn"
         yield _sse_evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason},

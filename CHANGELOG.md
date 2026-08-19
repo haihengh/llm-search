@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-19
+
+### Investigated
+- **Claude Code reporting "issues with my tool calls"** — root-caused via the repo's diagnostic probes (`probe_toolcall_diag.py`, `probe_toolset.py`) run against the live middleware and LM Studio. Findings:
+  - The `llm-search-middleware` Docker image was rebuilt and confirmed to match `HEAD` (hash-verified) — **not** stale code, as initially suspected from container-creation timestamps.
+  - Container logs showed one prior instance of the documented "relay reasoning as the answer" fallback (`tool_loop.py`, added in `a370b42`) firing when a reasoning model produced only chain-of-thought and no tool call/answer. This is intentional last-resort behavior, not a new bug, but it explains why the model's private deliberation ("I'm hitting a wall with tool calls...") can appear as if it were a reply.
+  - Found and fixed a **real contract violation**: `anthropic_stream_from_openai()` in `anthropic_adapter.py` set `stop_reason: "tool_use"` based on the raw upstream `finish_reason`, even on turns where every tool call was malformed and dropped by `_validate_openai_tool_call` (leaving zero `tool_use` content blocks actually emitted). Anthropic API consumers, including Claude Code's harness, can misbehave when told `stop_reason: tool_use` with no corresponding tool_use block in the message.
+  - Re-tested against a second, differently loaded model (`qwen/qwen3.8-27b`) with `probe_toolset.py` (Read-only, Read+Bash, +search tools, reordered) and a new full multi-turn probe (`probe_multiturn.py`: tool_use → tool_result → follow-up) — all passed with correct tool selection, valid arguments, and no reasoning leakage.
+  - Verified end-to-end `web_search` / `fetch_page` tool execution (`probe_websearch.py`) against `qwen/qwen3.8-27b`: confirmed via middleware logs (not just the model's answer text) that `web_search` hit SearXNG and `fetch_page` retrieved a real page before the model synthesized its answer.
+
+### Fixed
+- **Anthropic SSE `stop_reason` could claim `tool_use` with zero emitted tool_use blocks** — `anthropic_stream_from_openai()` now derives `stop_reason` from whether any validated tool call was actually streamed to the client (`pending_tool_calls`), not from the upstream `finish_reason`, which does not account for tool calls dropped during validation.
+
 ## [0.3.1] — 2026-08-05
 
 ### Added
