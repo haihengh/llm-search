@@ -32,6 +32,9 @@ jobs:
       - name: Generate release notes
         run: |
           TAG="${{ steps.version.outputs.tag }}"
+          # docker/metadata-action strips the leading "v" from semver tags,
+          # so the images are published as :0.3.3, :0.3, :latest — not :v0.3.3
+          IMAGE_TAG="${TAG#v}"
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
           {
@@ -42,7 +45,7 @@ jobs:
             echo "### Docker"
             echo '```bash'
             echo "docker pull ghcr.io/${{ github.repository }}:latest"
-            echo "docker pull ghcr.io/${{ github.repository }}:${TAG}"
+            echo "docker pull ghcr.io/${{ github.repository }}:${IMAGE_TAG}"
             echo '```'
             echo ""
 
