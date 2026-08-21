@@ -337,10 +337,11 @@ async def anthropic_stream_from_openai(
                 msg_lower = err_msg.lower()
                 if err_type == "context_overflow" or any(
                     m in msg_lower
-                    for m in ("n_ctx", "n_keep", "context length", "context_length", "context window")
+                    for m in ("n_ctx", "n_keep", "context length", "context_length", "context window", "context size", "exceed")
                 ):
                     err_type = "invalid_request_error"
-                    err_msg = f"prompt is too long: {err_msg}"
+                    if not err_msg.lower().startswith("prompt is too long"):
+                        err_msg = f"prompt is too long: {err_msg}"
                 elif "not reachable" in msg_lower or "connect" in msg_lower:
                     err_type = "api_error"
                 elif err_type not in ("invalid_request_error", "authentication_error",

@@ -202,7 +202,7 @@ claude "阅读 Python 3.14 发布说明并总结新特性"
 
 搞定。Claude Code 发送 Anthropic 格式请求 → 中间件内部转换 → 运行工具循环 → 返回 Anthropic 格式响应，自动注入 `web_search` 和 `fetch_page`。
 
-> 中间件会保留 Claude Code 发送的任何工具，与自动注入的搜索工具并存。
+> 中间件会保留 Claude Code 发送的任何工具，与自动注入的搜索工具并存。如果长会话填满了模型的上下文窗口，中间件会返回 `prompt is too long` 错误（HTTP 400），Claude Code 会自动压缩对话并重试 — 绝不会伪造空回答。
 
 ---
 

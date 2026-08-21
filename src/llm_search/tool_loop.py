@@ -47,6 +47,8 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "context length",
     "context_length",
     "context window",
+    "context size",
+    "exceed",
     "too long",
 )
 
@@ -57,7 +59,9 @@ def is_context_overflow(exc: LMStudioError) -> bool:
 
     llama.cpp phrases this as e.g. "The number of tokens to keep from
     the initial prompt is greater than the context length (n_keep: X
-    >= n_ctx: Y)". MLX and other backends use similar wording.
+    >= n_ctx: Y)", or LM Studio's "request (N tokens) exceeds the
+    available context size (M tokens)". MLX and other backends use
+    similar wording.
     """
     if exc.status_code is not None and exc.status_code != 400:
         return False
@@ -277,9 +281,24 @@ async def call_lm_studio_streaming(
                         if data == "[DONE]":
                             return
                         try:
-                            yield json.loads(data)
+                            chunk_data = json.loads(data)
                         except json.JSONDecodeError:
                             logger.debug("Skipping unparseable SSE line: %s", line[:100])
+                            continue
+                        # LM Studio streams HTTP-level failures as an SSE
+                        # "event: error" chunk with HTTP 200 (observed for
+                        # context overflow: "request (N tokens) exceeds the
+                        # available context size"). A chunk carrying "error"
+                        # is not a generation chunk — raise so the tool
+                        # loop's normal LMStudioError handling applies.
+                        if isinstance(chunk_data, dict) and "error" in chunk_data:
+                            err = chunk_data["error"]
+                            if isinstance(err, dict):
+                                raise LMStudioError(
+                                    err.get("message", "LM Studio streaming error"),
+                                    status_code=err.get("code") or 400,
+                                )
+                        yield chunk_data
         except httpx.ConnectError:
             raise LMStudioError(f"LM Studio not reachable at {lm_studio_url}")
         except (httpx.TimeoutException, httpx.ReadTimeout):
@@ -461,6 +480,21 @@ async def run_tool_loop(
 
         # No tool calls → LLM is done, return the answer
         if not tool_calls:
+            finish_reason = (response.get("choices") or [{}])[0].get("finish_reason")
+            if not content and finish_reason == "length":
+                # Generation was truncated before any answer text was
+                # produced — the prompt (or the model's chain-of-thought)
+                # exhausted the context window. Reasoning models burn the
+                # whole budget on reasoning_content and yield empty content
+                # when they hit the wall, which looks identical to a dead
+                # model. Surface it as a context overflow so clients that
+                # auto-compact on "prompt is too long" can recover.
+                raise LMStudioError(
+                    "prompt is too long: the model exhausted its context "
+                    "window before producing an answer "
+                    "(finish_reason=length, no content, no tool calls)",
+                    status_code=400,
+                )
             stats.total_iterations = iteration
             return {
                 "content": content or "",
@@ -832,6 +866,7 @@ async def run_tool_loop_streaming(
             reasoning_parts: list[str] = []    # chain-of-thought, never history
             tool_fragments: dict[int, dict[str, Any]] = {}
             chunk_count = 0
+            last_finish_reason: Optional[str] = None
             t0 = time.monotonic()
 
             async for chunk in call_lm_studio_streaming(
@@ -909,6 +944,7 @@ async def run_tool_loop_streaming(
                     )
 
                 if finish_reason is not None:
+                    last_finish_reason = finish_reason
                     break
 
             stats.record_llm_call((time.monotonic() - t0) * 1000)
@@ -965,6 +1001,41 @@ async def run_tool_loop_streaming(
                     # Something was already relayed (answer text, or
                     # chain-of-thought the caller asked to see).
                     yield _chunk_sse({}, "stop")
+                elif last_finish_reason == "length":
+                    # Generation was truncated before ANY answer text or
+                    # tool call was produced — the prompt (or the model's
+                    # chain-of-thought) exhausted the context window.
+                    # Reasoning models burn their whole budget on
+                    # reasoning_content and emit empty content when they
+                    # hit the wall, which looks identical to a dead model.
+                    #
+                    # Surface this as a context-overflow error instead of
+                    # relaying the half-finished thinking or a fake "empty
+                    # response" message: clients that auto-compact on
+                    # "prompt is too long" (Claude Code) then shrink the
+                    # conversation and retry successfully. Nothing has been
+                    # relayed in this iteration, so the error becomes the
+                    # first SSE event and the server turns it into an HTTP
+                    # 400 before headers are sent.
+                    logger.warning(
+                        "Generation truncated (finish_reason=length) with "
+                        "no content and no tool calls (%d reasoning chars, "
+                        "%d chunks) — reporting context overflow",
+                        len(thinking_text), chunk_count,
+                    )
+                    stats.total_iterations = iteration
+                    if stats_out is not None:
+                        stats_out.append(stats.to_dict())
+                    yield _error_sse(
+                        "prompt is too long: the model exhausted its "
+                        "context window mid-generation before producing "
+                        "an answer (finish_reason=length) — compact or "
+                        "shorten the conversation and retry",
+                        "context_overflow",
+                    )
+                    yield _stats_sse()
+                    yield "data: [DONE]\n\n"
+                    return
                 elif thinking_text:
                     # The model produced only chain-of-thought and we
                     # suppressed it, so nothing has been sent. A blank reply
@@ -1022,10 +1093,14 @@ async def run_tool_loop_streaming(
                             "stop",
                         )
                 stats.total_iterations = iteration
-                yield _stats_sse()
-                yield "data: [DONE]\n\n"
+                # Record stats BEFORE yielding — consumers (including our
+                # own adapters) stop consuming at [DONE], so lines after
+                # that yield never run and stats would silently never be
+                # ingested.
                 if stats_out is not None:
                     stats_out.append(stats.to_dict())
+                yield _stats_sse()
+                yield "data: [DONE]\n\n"
                 return
 
             if had_role:
@@ -1174,10 +1249,14 @@ async def run_tool_loop_streaming(
                         "tool_use" if is_last else None,
                     )
                 stats.total_iterations = iteration
-                yield _stats_sse()
-                yield "data: [DONE]\n\n"
+                # Record stats BEFORE yielding — consumers (including our
+                # own adapters) stop consuming at [DONE], so lines after
+                # that yield never run and stats would silently never be
+                # ingested.
                 if stats_out is not None:
                     stats_out.append(stats.to_dict())
+                yield _stats_sse()
+                yield "data: [DONE]\n\n"
                 return
 
             # Loop continues — LLM sees search results and responds
@@ -1203,18 +1282,18 @@ async def run_tool_loop_streaming(
             )
 
         stats.total_iterations = max_iter
+        if stats_out is not None:
+            stats_out.append(stats.to_dict())
         yield _chunk_sse({"role": "assistant"})
         yield _chunk_sse({"content": fallback}, "tool_loop_max")
         yield _stats_sse()
         yield "data: [DONE]\n\n"
-        if stats_out is not None:
-            stats_out.append(stats.to_dict())
 
     except LMStudioError as exc:
         logger.error("LM Studio error during streaming: %s", exc)
         err_type = "context_overflow" if is_context_overflow(exc) else "lm_studio_error"
+        if stats_out is not None:
+            stats_out.append(stats.to_dict())
         yield _error_sse(str(exc), err_type)
         yield _stats_sse()
         yield "data: [DONE]\n\n"
-        if stats_out is not None:
-            stats_out.append(stats.to_dict())

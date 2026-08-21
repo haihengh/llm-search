@@ -97,9 +97,43 @@ Tool call: fetch_page({'url': '...'})
 If those log lines are missing, the model answered from its own training
 data instead of actually searching, even if the final text looks plausible.
 
+### `probe_context_boundary.py` — raw LM Studio behavior at the context wall
+
+Sends three non-streaming requests with growing filler prompts (~60k,
+~103k, ~120k tokens) straight to LM Studio (bypassing the middleware) and
+reports status code + `finish_reason` + content length for each. Shows
+exactly what the middleware receives when a long Claude Code session fills
+the loaded model's context window — including the streaming quirk where the
+failure arrives as an `event: error` SSE chunk with HTTP 200.
+
+```bash
+python scripts/probes/probe_context_boundary.py [model-id]
+```
+
+### `probe_middleware_overflow.py` — middleware behavior at the context wall
+
+Three cases through the middleware (port 8001) `/v1/messages`, stream=True:
+
+- **A. Over limit** — prompt exceeds LM Studio's loaded context. LM Studio
+  400s with "exceeds the available context size"; the middleware must
+  classify it as context overflow and return HTTP 400 `prompt is too long`.
+- **B. Near limit + tiny max_tokens** — the model burns its whole
+  generation budget on reasoning and finishes with `finish_reason=length`
+  and zero content. The middleware must return HTTP 400 `prompt is too
+  long` (first SSE event is a `context_overflow` error) instead of
+  streaming "The model returned an empty response...".
+- **C. Sanity** — a short request still streams a normal 200 with content.
+
+```bash
+python scripts/probes/probe_middleware_overflow.py [model-id]
+```
+
+Rerun after changing context-overflow handling in `tool_loop.py`,
+`anthropic_adapter.py`, or `server.py`.
+
 ## Notes
 
-- All four scripts default to a hardcoded fallback model id if you don't
+- All scripts default to a hardcoded fallback model id if you don't
   pass one — always pass the model id you actually have loaded in LM
   Studio, e.g. `python scripts/probes/tool_use_stream.py qwen/qwen3.8-27b`.
 - `web_search` / `fetch_page` are executed inside the middleware and are
@@ -107,5 +141,5 @@ data instead of actually searching, even if the final text looks plausible.
   client-supplied tools (`Read`, `Bash`, etc.) pass through as `tool_use`
   blocks. A probe reporting no client-visible `tool_use` during a search
   question is expected, not a bug; check the container logs instead.
-- See `CHANGELOG.md` (`[0.3.2]`) for the investigation that produced these
-  probes and the bug they helped find and fix.
+- See `CHANGELOG.md` (`[0.3.2]`, `[0.3.3]`) for the investigations that
+  produced these probes and the bugs they helped find and fix.

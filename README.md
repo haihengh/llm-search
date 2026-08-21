@@ -234,7 +234,7 @@ claude "Read the Python 3.14 release notes and summarize new features"
 
 That's it. Claude Code sends Anthropic-format requests → middleware translates internally → runs tool loop → returns Anthropic-format responses with `web_search` and `fetch_page` auto-injected.
 
-> The middleware auto-injects `web_search` + `fetch_page` alongside your client's existing tools. The LLM sees both — client tools (Bash, Read, Write, etc.) are passed through and executed by the client, while search tools are handled server-side. If the LLM hallucinates a tool name that doesn't exist, the middleware feeds back an error so the model can recover. If the LLM can't converge on an answer, the middleware returns accumulated search results as a fallback instead of an error.
+> The middleware auto-injects `web_search` + `fetch_page` alongside your client's existing tools. The LLM sees both — client tools (Bash, Read, Write, etc.) are passed through and executed by the client, while search tools are handled server-side. If the LLM hallucinates a tool name that doesn't exist, the middleware feeds back an error so the model can recover. If the LLM can't converge on an answer, the middleware returns accumulated search results as a fallback instead of an error. If a long session fills the model's context window, the middleware returns a `prompt is too long` error (HTTP 400) so Claude Code auto-compacts the conversation and retries — it never fakes an empty answer.
 
 ---
 

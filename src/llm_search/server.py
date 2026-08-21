@@ -364,6 +364,8 @@ async def chat_completions(request: Request, body: ChatRequest):
             max_tokens=body.max_tokens,
         )
     except LMStudioError as exc:
+        if is_context_overflow(exc):
+            raise HTTPException(status_code=400, detail=f"prompt is too long: {exc}")
         raise HTTPException(status_code=502, detail=str(exc))
     except ToolLoopExhaustedError as exc:
         # Return a 200 but signal that we hit the loop limit
@@ -521,6 +523,12 @@ async def messages(request: Request):
                 except (IndexError, json.JSONDecodeError):
                     error_type, error_msg = "api_error", "Unknown error"
 
+                # This early return bypasses sse_wrapper's finally block,
+                # so ingest the request stats here (the tool loop records
+                # them before yielding the error event).
+                if stats_container:
+                    _ingest_request_stats(stats_container[0])
+
                 status_code = 400 if error_type == "invalid_request_error" else 502
                 return JSONResponse(
                     status_code=status_code,
@@ -676,6 +684,8 @@ async def responses_api(request: Request):
                 msg = error_info.get("message", "Unknown error")
             except (IndexError, json.JSONDecodeError):
                 msg = "Unknown error"
+            if stats_container:
+                _ingest_request_stats(stats_container[0])
             return JSONResponse(
                 status_code=502,
                 content={"error": {"code": "server_error", "message": msg}},

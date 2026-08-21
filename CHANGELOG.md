@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-08-20
+
+### Added
+- **Context-overflow detection for streaming errors** — LM Studio streams HTTP-level failures as `event: error` SSE chunks with HTTP 200 (observed for context overflow: "request (N tokens) exceeds the available context size"). `call_lm_studio_streaming()` now raises a proper `LMStudioError` instead of silently skipping the chunk.
+- **Truncated-generation detection** — when an iteration ends with `finish_reason=length`, no content, and no tool calls (a reasoning model that burns the whole context budget on chain-of-thought looks identical to a dead model), the middleware now surfaces a `context_overflow` error instead of relaying the half-finished reasoning or the fake "empty response" text. Covered in both the non-streaming tool loop (raises `LMStudioError`) and the streaming path (emitted as the *first* SSE event, so the server can map it to HTTP 400 before headers are sent).
+- **Context-overflow probes** — `scripts/probes/probe_context_boundary.py` (prompts at ~60k/103k/120k tokens straight to LM Studio to observe its raw behavior) and `scripts/probes/probe_middleware_overflow.py` (end-to-end through the middleware: over-limit → 400, reasoning-burn → 400, sanity → 200), documented in `docs/probes.md`.
+
+### Fixed
+- **Streaming stats silently dropped** — `stats_out` is now appended *before* the terminal `[DONE]` yields in all three streaming paths. Consumers stop consuming at `[DONE]`, so the previous after-yield code never ran and `/stats` stayed all-zero.
+- **`/v1/chat/completions` returned 502 for context overflow** — now maps to HTTP 400 `prompt is too long` like `/v1/messages`, so clients that auto-compact on that error (e.g. Claude Code) recover instead of hitting the same wall.
+- **Early-error paths skipped stats ingestion** — the first-chunk 400/502 returns in `/v1/messages` and `/v1/responses` bypass `sse_wrapper`'s finally block; they now ingest request stats before returning.
+- **Overflow wording misses** — `anthropic_adapter.py` no longer double-prefixes `prompt is too long:` and recognizes LM Studio's actual wording ("context size", "exceed") in `_CONTEXT_OVERFLOW_MARKERS`.
+- **Tests patched the wrong client** — several streaming tests patched `call_lm_studio` while the streaming loop calls `call_lm_studio_streaming`, silently hitting the real LM Studio (one run hung for 32 minutes). Now hermetic, plus new tests for every path above and a `tests/conftest.py` fixture that clears the search-cache singleton between tests.
+
 ## [0.3.2] — 2026-08-19
 
 ### Investigated
@@ -192,6 +206,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.3]: https://github.com/haihengh/llm-search/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/haihengh/llm-search/compare/v0.2.1...v0.2.2
 [0.2.5]: https://github.com/haihengh/llm-search/compare/v0.2.4...v0.2.5
+[0.3.3]: https://github.com/haihengh/llm-search/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/haihengh/llm-search/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/haihengh/llm-search/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/haihengh/llm-search/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/haihengh/llm-search/compare/v0.2.7...v0.2.8

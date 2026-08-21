@@ -12,6 +12,7 @@ from llm_search.tool_loop import (
     ToolLoopExhaustedError,
     call_lm_studio_streaming,
     extract_assistant_message,
+    is_context_overflow,
     run_tool_loop,
     run_tool_loop_streaming,
 )
@@ -113,6 +114,31 @@ class TestToolLoop:
         assert result["tool_calls_count"] == 0
 
     @pytest.mark.asyncio
+    async def test_length_truncation_without_content_raises_context_overflow(self):
+        """finish_reason=length with no content and no tool calls → context
+        overflow error, not a silently empty answer."""
+        provider = FakeSearchProvider()
+        mock_response = {
+            "choices": [{
+                "message": {"role": "assistant", "content": None},
+                "finish_reason": "length",
+            }],
+            "usage": {"prompt_tokens": 90000, "completion_tokens": 8000},
+        }
+
+        with patch("llm_search.tool_loop.call_lm_studio", new=AsyncMock(return_value=mock_response)):
+            with pytest.raises(LMStudioError) as excinfo:
+                await run_tool_loop(
+                    messages=[{"role": "user", "content": "Explain this."}],
+                    search_provider=provider,
+                    model="test-model",
+                    lm_studio_url="http://localhost:1234/v1",
+                )
+
+        assert "context window" in str(excinfo.value)
+        assert excinfo.value.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_single_search_then_answer(self):
         """LLM searches once, then answers."""
         provider = FakeSearchProvider(results=[
@@ -193,16 +219,25 @@ class TestToolLoop:
             SearchResult("R", "https://x.com", "S", 1),
         ])
 
-        # Always return a tool call — never a plain answer
-        always_search = make_mock_lm_response(tool_calls=[{
-            "id": "call_infinite",
-            "type": "function",
-            "function": {"name": "web_search", "arguments": '{"query": "still searching"}'},
-        }])
+        # Always return a tool call — never a plain answer. Each call uses a
+        # NEW query: duplicate detection blocks repeated queries, so a
+        # constant query would only ever search once.
+        counter = {"n": 0}
+
+        def _next_response(*args, **kwargs):
+            counter["n"] += 1
+            return make_mock_lm_response(tool_calls=[{
+                "id": f"call_{counter['n']}",
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "arguments": json.dumps({"query": f"still searching {counter['n']}"}),
+                },
+            }])
 
         with patch(
             "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(return_value=always_search),
+            new=AsyncMock(side_effect=_next_response),
         ):
             result = await run_tool_loop(
                 messages=[{"role": "user", "content": "Question"}],
@@ -599,6 +634,7 @@ class TestCallLMStudioStreaming:
 
         # Mock httpx.AsyncClient.stream to return SSE lines
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.aiter_lines = MagicMock(return_value=async_gen_from(sse_lines))
         mock_response.raise_for_status = MagicMock()
 
@@ -650,6 +686,49 @@ class TestCallLMStudioStreaming:
                         lm_studio_url="http://localhost:1234/v1",
                     ):
                         pass
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_raises_lm_studio_error(self):
+        """LM Studio streams a failure as an SSE error chunk with HTTP 200
+        (observed for context overflow) → raise LMStudioError, not a
+        silently-skipped chunk."""
+        sse_lines = [
+            'data: {"error":{"message":"request (106724 tokens) exceeds the '
+            'available context size (104192 tokens)","code":400}}',
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.aiter_lines = MagicMock(return_value=async_gen_from(sse_lines))
+        mock_response.raise_for_status = MagicMock()
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        mock_client = MagicMock()
+        mock_client.stream = MagicMock(return_value=mock_stream_ctx)
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        httpx_patch = patch("llm_search.tool_loop.httpx.AsyncClient", return_value=mock_client_ctx)
+        try:
+            httpx_patch.start()
+            with pytest.raises(LMStudioError) as excinfo:
+                async for _ in call_lm_studio_streaming(
+                    messages=[{"role": "user", "content": "Hi"}],
+                    tools=[],
+                    model="test-model",
+                    lm_studio_url="http://localhost:1234/v1",
+                ):
+                    pass
+        finally:
+            httpx_patch.stop()
+
+        assert "context size" in str(excinfo.value)
+        assert excinfo.value.status_code == 400
+        assert is_context_overflow(excinfo.value)
 
 
 def _make_streaming_mock(chunks: list):
@@ -705,8 +784,14 @@ class TestRunToolLoopStreaming:
         assert first["choices"][0]["delta"]["role"] == "assistant"
         assert first["id"] == "test-123"
 
-        # Last content chunk should have finish_reason
-        last_content = json.loads(events[-2][6:].strip())
+        # Last content chunk should have finish_reason. The stream ends with
+        # an "event: stats" SSE then [DONE], so filter to data events only.
+        content_events = [
+            json.loads(e[6:].strip())
+            for e in events
+            if e.startswith("data: ") and e[6:].strip() != "[DONE]"
+        ]
+        last_content = content_events[-1]
         assert last_content["choices"][0]["finish_reason"] == "stop"
 
     @pytest.mark.asyncio
@@ -766,19 +851,26 @@ class TestRunToolLoopStreaming:
             SearchResult("R", "https://x.com", "S", 1),
         ])
 
-        # Always return a tool call — never a plain answer
-        always_search = make_mock_lm_response(tool_calls=[{
-            "id": "call_infinite",
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "arguments": '{"query": "still searching"}',
-            },
-        }])
+        # Always stream a web_search tool call — never a plain answer.
+        # The streaming loop only uses call_lm_studio_streaming; patching
+        # the non-streaming client here would silently hit the real
+        # LM Studio (and can hang for the whole context window).
+        sse_chunks = [
+            make_sse_chunk({"tool_calls": [{
+                "index": 0,
+                "id": "call_infinite",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": ""},
+            }]}),
+            make_sse_chunk({"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": '{"query": "still searching"}'},
+            }]}, finish_reason="tool_calls"),
+        ]
 
         with patch(
-            "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(return_value=always_search),
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
         ):
             events = []
             async for sse_str in run_tool_loop_streaming(
@@ -811,9 +903,16 @@ class TestRunToolLoopStreaming:
         """LM Studio down → yields error SSE and [DONE]."""
         provider = FakeSearchProvider()
 
+        # The streaming loop calls call_lm_studio_streaming (not the
+        # non-streaming client), so that is what must be patched — the
+        # previous patch target silently hit the real LM Studio.
+        async def _error_gen(*args, **kwargs):
+            raise LMStudioError("LM Studio not reachable")
+            yield  # pragma: no cover — makes this an async generator
+
         with patch(
-            "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(side_effect=LMStudioError("LM Studio not reachable")),
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_error_gen,
         ):
             events = []
             async for sse_str in run_tool_loop_streaming(
@@ -829,6 +928,72 @@ class TestRunToolLoopStreaming:
         error_event = json.loads(events[0][6:].strip())
         assert error_event["error"]["type"] == "lm_studio_error"
         assert "not reachable" in error_event["error"]["message"]
+        assert "data: [DONE]" in events[-1]
+
+    @pytest.mark.asyncio
+    async def test_length_truncation_with_only_reasoning_yields_context_overflow(self):
+        """Model reasons to the context wall (finish_reason=length, zero
+        content) → context-overflow error SSE; CoT is NOT relayed as text."""
+        provider = FakeSearchProvider()
+        sse_chunks = [
+            make_sse_chunk({"reasoning_content": "Let me think..."}),
+            make_sse_chunk({"reasoning_content": " ...still thinking..."}),
+            make_sse_chunk({}, finish_reason="length"),
+        ]
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
+        ):
+            events = []
+            async for sse_str in run_tool_loop_streaming(
+                messages=[{"role": "user", "content": "Question"}],
+                search_provider=provider,
+                chatcmpl_id="test-length1",
+                created=5000,
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+                relay_reasoning=False,
+            ):
+                events.append(sse_str)
+
+        first = json.loads(events[0][6:].strip())
+        assert first["error"]["type"] == "context_overflow"
+        assert "prompt is too long" in first["error"]["message"]
+        # The half-finished chain-of-thought must not leak to the caller.
+        assert not any("still thinking" in e for e in events)
+        assert "data: [DONE]" in events[-1]
+
+    @pytest.mark.asyncio
+    async def test_length_truncation_with_empty_response_yields_context_overflow(self):
+        """A single empty chunk with finish_reason=length (no generation
+        room left) → context-overflow error, not the fake empty-response
+        diagnostic text."""
+        provider = FakeSearchProvider()
+        sse_chunks = [
+            make_sse_chunk({}, finish_reason="length"),
+        ]
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
+        ):
+            events = []
+            async for sse_str in run_tool_loop_streaming(
+                messages=[{"role": "user", "content": "Question"}],
+                search_provider=provider,
+                chatcmpl_id="test-length2",
+                created=6000,
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+                relay_reasoning=False,
+            ):
+                events.append(sse_str)
+
+        first = json.loads(events[0][6:].strip())
+        assert first["error"]["type"] == "context_overflow"
+        assert "prompt is too long" in first["error"]["message"]
+        assert not any("returned an empty response" in e for e in events)
         assert "data: [DONE]" in events[-1]
 
     @pytest.mark.asyncio
@@ -904,22 +1069,27 @@ class TestRunToolLoopStreaming:
         """Streaming: LLM calls client-provided tool → emitted as SSE delta, stream ends."""
         provider = FakeSearchProvider()
 
-        # LLM calls "read_file" — it IS in client tools
-        call1 = make_mock_lm_response(
-            content="Let me read that file.",
-            tool_calls=[{
+        # LLM calls "read_file" — it IS in client tools. The streaming loop
+        # only uses call_lm_studio_streaming; patching the non-streaming
+        # client here would silently hit the real LM Studio.
+        sse_chunks = [
+            make_sse_chunk({"role": "assistant"}),
+            make_sse_chunk({"content": "Let me read that file."}),
+            make_sse_chunk({"tool_calls": [{
+                "index": 0,
                 "id": "call_read",
                 "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "arguments": '{"path": "/tmp/test.txt"}',
-                },
-            }]
-        )
+                "function": {"name": "read_file", "arguments": ""},
+            }]}),
+            make_sse_chunk({"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": '{"path": "/tmp/test.txt"}'},
+            }]}, finish_reason="tool_calls"),
+        ]
 
         with patch(
-            "llm_search.tool_loop.call_lm_studio",
-            new=AsyncMock(return_value=call1),
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
         ):
             events = []
             async for sse_str in run_tool_loop_streaming(
