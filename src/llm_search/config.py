@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     # --- LM Studio ---
     lm_studio_url: str = "http://host.docker.internal:1234/v1"
+    # Bearer token for the LLM backend. Empty means "send no auth header",
+    # which is what LM Studio/Ollama want; vLLM-style servers need it set.
+    lm_studio_api_key: str = ""
     lm_studio_timeout: float = 120.0
 
     # --- Middleware server ---
@@ -62,6 +65,7 @@ class RuntimeConfig:
     # (Infra-level keys like host/port are intentionally excluded.)
     _EDITABLE_KEYS = frozenset({
         "lm_studio_url",
+        "lm_studio_api_key",
         "search_provider",
         "searxng_url",
         "search_api_key",
@@ -77,6 +81,7 @@ class RuntimeConfig:
 
         # Seed from immutable settings
         self.lm_studio_url: str = settings.lm_studio_url
+        self.lm_studio_api_key: str = settings.lm_studio_api_key
         self.search_provider: str = settings.search_provider
         self.searxng_url: str = settings.searxng_url
         self.search_api_key: str = settings.search_api_key
@@ -90,6 +95,22 @@ class RuntimeConfig:
     def to_dict(self) -> dict[str, Any]:
         """Return all editable fields as a dict (for the API)."""
         return {k: getattr(self, k) for k in self._EDITABLE_KEYS}
+
+    @property
+    def lm_studio_headers(self) -> dict[str, str]:
+        """Auth headers to send to the LLM backend.
+
+        Empty when no key is configured, so backends that want no
+        authentication (LM Studio, Ollama) keep working unchanged. vLLM-style
+        servers reject unauthenticated requests with 401 and need this.
+
+        The check is falsy rather than ``!= ""`` because ``update()`` can
+        assign ``None`` when called programmatically.
+        """
+        key = self.lm_studio_api_key
+        if not key:
+            return {}
+        return {"Authorization": f"Bearer {key}"}
 
     # ── Update ───────────────────────────────────────────────────
 

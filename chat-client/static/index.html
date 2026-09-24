@@ -112,6 +112,11 @@
                             <span class="settings-hint">e.g. http://localhost:1234/v1 or http://192.168.1.50:1234/v1</span>
                         </label>
                         <label>
+                            LLM API Key
+                            <input type="password" id="cfg-lm-studio-api-key" autocomplete="new-password" placeholder="(leave empty if the backend needs no auth)">
+                            <span class="settings-hint">Bearer token — required by vLLM and similar backends, not by LM Studio</span>
+                        </label>
+                        <label>
                             Timeout (seconds)
                             <input type="number" id="cfg-timeout" min="10" max="600" step="1" placeholder="120">
                         </label>

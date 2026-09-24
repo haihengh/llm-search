@@ -269,6 +269,7 @@ SEARXNG_URL=http://searxng:8080   # SearXNG address (Docker service name)
 
 # --- LM Studio ---
 LM_STUDIO_URL=http://host.docker.internal:1234/v1
+# LM_STUDIO_API_KEY=...       # Bearer token, only if the backend requires one (vLLM etc.)
 
 # --- Middleware ---
 MIDDLEWARE_HOST=0.0.0.0
@@ -306,6 +307,7 @@ services:
       - SEARCH_PROVIDER=searxng
       - SEARXNG_URL=http://searxng:8080
       - LM_STUDIO_URL=http://host.docker.internal:1234/v1
+      # - LM_STUDIO_API_KEY=...   # only if the backend requires auth
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

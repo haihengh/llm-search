@@ -69,6 +69,26 @@ def is_context_overflow(exc: LMStudioError) -> bool:
     return any(marker in msg for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
+def _auth_hint(status_code: int) -> str:
+    """Extra guidance when the LLM backend rejects our credentials.
+
+    A bare "returned 401: {\"error\":\"Unauthorized\"}" gives no clue which
+    knob is wrong, so name it — and distinguish "no key configured" from
+    "key configured but rejected", which need different fixes.
+    """
+    if status_code not in (401, 403):
+        return ""
+    if not runtime_config.lm_studio_api_key:
+        return (
+            " — the LLM backend requires an API key and none is configured. "
+            "Set LM_STUDIO_API_KEY (env or .env) or PUT /v1/config."
+        )
+    return (
+        " — LM_STUDIO_API_KEY was rejected. Check it against the backend's "
+        "own key (VLLM_API_KEY for vLLM)."
+    )
+
+
 # ── Reasoning Toggle ──────────────────────────────────────────
 
 _NO_REASONING_PROMPT = (
@@ -214,7 +234,9 @@ async def call_lm_studio(
     timeout = runtime_config.lm_studio_timeout
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            response = await client.post(url, json=payload)
+            response = await client.post(
+                url, json=payload, headers=runtime_config.lm_studio_headers
+            )
             response.raise_for_status()
             return response.json()
         except httpx.ConnectError:
@@ -228,7 +250,8 @@ async def call_lm_studio(
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
-                f"{exc.response.text[:500]}",
+                f"{exc.response.text[:500]}"
+                f"{_auth_hint(exc.response.status_code)}",
                 status_code=exc.response.status_code,
             )
 
@@ -264,12 +287,16 @@ async def call_lm_studio_streaming(
     timeout = runtime_config.lm_studio_timeout
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            async with client.stream("POST", url, json=payload) as response:
+            async with client.stream(
+                "POST", url, json=payload,
+                headers=runtime_config.lm_studio_headers,
+            ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
                     raise LMStudioError(
                         f"LM Studio returned {response.status_code}: "
-                        f"{body.decode(errors='replace')[:500]}",
+                        f"{body.decode(errors='replace')[:500]}"
+                        f"{_auth_hint(response.status_code)}",
                         status_code=response.status_code,
                     )
                 async for line in response.aiter_lines():
@@ -310,7 +337,8 @@ async def call_lm_studio_streaming(
         except httpx.HTTPStatusError as exc:
             raise LMStudioError(
                 f"LM Studio returned {exc.response.status_code}: "
-                f"{exc.response.text[:500]}",
+                f"{exc.response.text[:500]}"
+                f"{_auth_hint(exc.response.status_code)}",
                 status_code=exc.response.status_code,
             )
 
@@ -890,7 +918,12 @@ async def run_tool_loop_streaming(
                 # apart: only `content` is the assistant's actual reply, and
                 # only `content` is eligible to enter the conversation history.
                 raw_content = delta.get("content") or ""
-                raw_reasoning = delta.get("reasoning_content") or ""
+                # The field name varies by backend: LM Studio / llama.cpp
+                # emit reasoning_content, vLLM (e.g. HyperQwen) emits
+                # reasoning. Read either, or the thinking is dropped silently.
+                raw_reasoning = (
+                    delta.get("reasoning_content") or delta.get("reasoning") or ""
+                )
 
                 # Chain-of-thought — relayed only when the caller opted in.
                 if raw_reasoning:

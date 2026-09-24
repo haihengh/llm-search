@@ -271,6 +271,7 @@ SEARXNG_URL=http://searxng:8080   # SearXNG 地址（Docker 服务名）
 LM_STUDIO_URL=http://host.docker.internal:1234/v1   # LM Studio
 # LM_STUDIO_URL=http://host.docker.internal:11434/v1 # Ollama
 LM_STUDIO_TIMEOUT=120.0       # LLM 请求超时时间
+# LM_STUDIO_API_KEY=...       # Bearer 令牌；仅当后端要求认证时设置（如 vLLM）
 
 # --- 中间件服务器 ---
 MIDDLEWARE_HOST=0.0.0.0

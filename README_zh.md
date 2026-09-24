@@ -416,6 +416,70 @@ cp .env.example .env
 
 所有配置均通过环境变量设置 — 详见 `.env.example`。
 
+如果本机 8000 端口已被占用，可在 `.env` 中设置 `MIDDLEWARE_PORT`（例如 `MIDDLEWARE_PORT=8001`），然后重新执行 `docker compose up -d` — 聊天界面仍位于 8080 端口。不确定实际端口时可用 `docker ps` 查看。
+
+### 运行时更改 LLM 地址（无需重启）
+
+中间件提供运行时配置 API — 无需重建容器或修改文件即可切换 LLM 后端。`LM_STUDIO_URL`（环境变量 / `.env`）只是启动时的默认值；此处所做的更改会覆盖它，直到容器重启。
+
+**1. 查看当前配置：**
+
+```bash
+curl http://localhost:8000/v1/config
+```
+
+**2. 指向其他端口上的 LLM**（例如 LM Studio 运行在主机的 3080 端口）：
+
+```bash
+curl -X PUT http://localhost:8000/v1/config \
+  -H "Content-Type: application/json" \
+  -d '{"lm_studio_url": "http://host.docker.internal:3080/v1"}'
+```
+
+PowerShell（如果设置了 `MIDDLEWARE_PORT`，请调整端口号）：
+
+```powershell
+Invoke-RestMethod -Method Put -Uri http://localhost:8000/v1/config `
+  -ContentType 'application/json' `
+  -Body '{"lm_studio_url": "http://host.docker.internal:3080/v1"}'
+```
+
+**3. 验证中间件能否连通 LLM：**
+
+```bash
+curl http://localhost:8000/v1/models
+```
+
+`/v1/config` 接口还接受 `search_provider`、`searxng_url`、`search_api_key`、`max_tool_loop_iterations`、`max_client_tools`、`lm_studio_timeout` 和 `max_search_results` — 均为可选，只有提供的字段会被修改。聊天界面的 ⚙️ 设置弹窗写入的也是同一个接口。
+
+### 独立运行中间件容器（不使用 compose）
+
+如果只需要中间件容器（SearXNG 单独运行，或指向其他搜索后端）：
+
+```bash
+# 先构建一次（镜像需要命名 — llm-search-middleware 是 compose 中的容器名，不是镜像名）
+docker build -t llm-search-middleware .
+
+docker run -d -p 8000:8000 \
+  -e LM_STUDIO_URL="http://host.docker.internal:3080/v1" \
+  -e SEARXNG_URL="http://host.docker.internal:8080" \
+  --add-host "host.docker.internal:host-gateway" \
+  llm-search-middleware
+```
+
+PowerShell：
+
+```powershell
+docker run -d -p 8000:8000 `
+  -e LM_STUDIO_URL="http://host.docker.internal:3080/v1" `
+  --add-host "host.docker.internal:host-gateway" `
+  llm-search-middleware
+```
+
+也可以跳过构建直接使用预构建镜像：`ghcr.io/haihengh/llm-search:latest`。
+
+> `--add-host host.docker.internal:host-gateway` 让容器能够访问运行在宿主机上的 LLM。compose 文件会自动添加此项。注意：`docker compose` 启动的 SearXNG 不向宿主机暴露端口 — 独立运行主要适用于指向其他位置的搜索后端。
+
 ## 协议
 
 MIT

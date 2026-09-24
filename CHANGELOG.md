@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Backend API key support (`LM_STUDIO_API_KEY`)** — the middleware can now authenticate to its LLM backend. It previously sent no auth header at all, so an OpenAI-compatible server that requires one (vLLM, and others that answer unauthenticated requests with 401) could not be used. Set `LM_STUDIO_API_KEY` in the environment / `.env`, or change it at runtime via `PUT /v1/config` or the chat settings modal. Empty by default, so LM Studio and Ollama are unaffected. The key is sent only to the configured LLM backend — never on the `fetch_page` path, which retrieves arbitrary user-supplied URLs.
+- **Actionable 401/403 errors** — a rejected credential now says whether *no* key is configured or the configured key was rejected, instead of surfacing a bare `returned 401: {"error":"Unauthorized"}`.
+
+### Fixed
+- **Chain-of-thought silently dropped on backends that name the field `reasoning`** — the streaming path read only `delta.reasoning_content` (LM Studio / llama.cpp); vLLM and other backends emit `delta.reasoning`, so their thinking was discarded. Now reads either.
+- **API keys written to the log in plaintext** — `PUT /v1/config` logged the changed values verbatim, which included `search_api_key` and would have included the new backend key. Any `*_api_key` field is now redacted.
+
 ## [0.3.3] — 2026-08-20
 
 ### Added

@@ -761,7 +761,9 @@ async def list_models():
     url = f"{runtime_config.lm_studio_url.rstrip('/')}/models"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
+            response = await client.get(
+                url, headers=runtime_config.lm_studio_headers
+            )
             response.raise_for_status()
             return response.json()
     except httpx.ConnectError:
@@ -791,7 +793,10 @@ async def health():
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{runtime_config.lm_studio_url.rstrip('/')}/models")
+            resp = await client.get(
+                f"{runtime_config.lm_studio_url.rstrip('/')}/models",
+                headers=runtime_config.lm_studio_headers,
+            )
             lm_studio_ok = resp.status_code == 200
     except Exception:
         pass
@@ -846,6 +851,7 @@ async def stats():
 class ConfigUpdateRequest(BaseModel):
     """Fields for updating runtime config. All are optional."""
     lm_studio_url: Optional[str] = None
+    lm_studio_api_key: Optional[str] = None
     search_provider: Optional[str] = None
     searxng_url: Optional[str] = None
     search_api_key: Optional[str] = None
@@ -878,7 +884,14 @@ async def update_config(body: ConfigUpdateRequest):
         return {"changed": {}, "config": runtime_config.to_dict()}
 
     changed = runtime_config.update(**updates)
-    logger.info("Runtime config updated: %s", changed)
+    # Never log key material verbatim — `changed` carries the raw values.
+    logger.info(
+        "Runtime config updated: %s",
+        {
+            k: ("***" if k.endswith("_api_key") and v else v)
+            for k, v in changed.items()
+        },
+    )
     return {"changed": changed, "config": runtime_config.to_dict()}
 
 
