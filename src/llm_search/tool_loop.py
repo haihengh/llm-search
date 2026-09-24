@@ -718,8 +718,11 @@ async def run_tool_loop(
         "searches": total_searches,
         # OpenAI vocabulary — same constraint as the "tool_calls" branch
         # above. "stop" rather than a custom value because the fallback is a
-        # complete message, not truncated output; `iterations` already
-        # carries the bail-out signal for anyone who needs it.
+        # complete message, not truncated output. The cost: `iterations` is
+        # dropped by the ChatResponse model and never reaches the wire, so on
+        # a non-streaming request the fallback text is the only clue the loop
+        # bailed out. Streaming clients still get it via the `event: stats`
+        # frame (`total_iterations`).
         "finish_reason": "stop",
         "stats": stats.to_dict(),
     }
