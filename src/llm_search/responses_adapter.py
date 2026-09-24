@@ -224,7 +224,7 @@ def openai_result_to_responses(
 
     # Status
     finish = result.get("finish_reason", "stop")
-    status = "completed" if finish in ("stop", "tool_use") else "incomplete"
+    status = "completed" if finish in ("stop", "tool_calls") else "incomplete"
 
     return {
         "id": resp_id,

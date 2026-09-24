@@ -447,6 +447,70 @@ cp .env.example .env
 
 All configuration via environment variables — see `.env.example` for the full list.
 
+If port 8000 is already in use on your machine, set `MIDDLEWARE_PORT` in `.env` (e.g. `MIDDLEWARE_PORT=8001`) and run `docker compose up -d` again — the chat UI stays on 8080. Find the actual port with `docker ps` if you're not sure.
+
+### Changing the LLM URL at runtime (no restart)
+
+The middleware exposes a runtime config API — repoint it at a different LLM backend without recreating containers or editing files. `LM_STUDIO_URL` (env var / `.env`) is only the startup default; any change here overrides it until the container restarts.
+
+**1. View current config:**
+
+```bash
+curl http://localhost:8000/v1/config
+```
+
+**2. Point at an LLM on a different port** (e.g. LM Studio running on port 3080 on the host):
+
+```bash
+curl -X PUT http://localhost:8000/v1/config \
+  -H "Content-Type: application/json" \
+  -d '{"lm_studio_url": "http://host.docker.internal:3080/v1"}'
+```
+
+PowerShell (adjust the port if `MIDDLEWARE_PORT` is set):
+
+```powershell
+Invoke-RestMethod -Method Put -Uri http://localhost:8000/v1/config `
+  -ContentType 'application/json' `
+  -Body '{"lm_studio_url": "http://host.docker.internal:3080/v1"}'
+```
+
+**3. Verify the middleware can reach the LLM:**
+
+```bash
+curl http://localhost:8000/v1/models
+```
+
+The `/v1/config` endpoint also accepts `search_provider`, `searxng_url`, `search_api_key`, `max_tool_loop_iterations`, `max_client_tools`, `lm_studio_timeout`, and `max_search_results` — all optional; only the fields you provide are changed. The chat UI's ⚙️ settings modal writes to the same endpoint.
+
+### Standalone middleware container (no compose)
+
+If you want just the middleware container (and run SearXNG separately or point at another search backend):
+
+```bash
+# Build once (the image needs a name — llm-search-middleware is a container name in compose, not an image)
+docker build -t llm-search-middleware .
+
+docker run -d -p 8000:8000 \
+  -e LM_STUDIO_URL="http://host.docker.internal:3080/v1" \
+  -e SEARXNG_URL="http://host.docker.internal:8080" \
+  --add-host "host.docker.internal:host-gateway" \
+  llm-search-middleware
+```
+
+PowerShell:
+
+```powershell
+docker run -d -p 8000:8000 `
+  -e LM_STUDIO_URL="http://host.docker.internal:3080/v1" `
+  --add-host "host.docker.internal:host-gateway" `
+  llm-search-middleware
+```
+
+Or skip the build with the prebuilt image: `ghcr.io/haihengh/llm-search:latest`.
+
+> `--add-host host.docker.internal:host-gateway` lets the container reach the LLM running on the host machine. The compose file adds it automatically. Note that `docker compose` runs SearXNG without exposing it to the host — the standalone route is mainly for pointing at a search backend elsewhere.
+
 ## Diagnosing Tool-Calling Issues
 
 If a client reports broken or hallucinated tool calls (or you just loaded a

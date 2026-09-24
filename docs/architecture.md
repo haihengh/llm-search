@@ -269,6 +269,7 @@ SEARXNG_URL=http://searxng:8080   # SearXNG address (Docker service name)
 
 # --- LM Studio ---
 LM_STUDIO_URL=http://host.docker.internal:1234/v1
+# LM_STUDIO_API_KEY=...       # Bearer token, only if the backend requires one (vLLM etc.)
 
 # --- Middleware ---
 MIDDLEWARE_HOST=0.0.0.0
@@ -306,6 +307,7 @@ services:
       - SEARCH_PROVIDER=searxng
       - SEARXNG_URL=http://searxng:8080
       - LM_STUDIO_URL=http://host.docker.internal:1234/v1
+      # - LM_STUDIO_API_KEY=...   # only if the backend requires auth
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -391,7 +393,7 @@ The middleware sends only `web_search` + `fetch_page` to the LLM. Client tools a
 | LM Studio unreachable | 502 — `{"error": "LM Studio not reachable at http://..."}`  |
 | SearXNG unreachable | 502 — `{"error": "Search engine not available"}` |
 | SearXNG returns no results | Empty results passed to LLM — it informs the user naturally |
-| Tool loop exceeds max iterations | 200 — returns accumulated search results as fallback with `finish_reason: "tool_loop_max"` |
+| Tool loop exceeds max iterations | 200 — returns accumulated search results as fallback with `finish_reason: "stop"` |
 | Client sends malformed tools | 400 — validation error |
 | Rate limit hit | 429 — `{"error": "Too many requests", "retry_after": 5}` |
 

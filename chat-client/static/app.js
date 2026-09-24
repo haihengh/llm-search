@@ -696,6 +696,7 @@ async function openSettings() {
 
         // Populate form
         $('#cfg-lm-studio-url').value = cfg.lm_studio_url || '';
+        $('#cfg-lm-studio-api-key').value = cfg.lm_studio_api_key || '';
         $('#cfg-timeout').value = cfg.lm_studio_timeout || 120;
         $('#cfg-search-provider').value = cfg.search_provider || 'searxng';
         $('#cfg-searxng-url').value = cfg.searxng_url || '';
@@ -725,6 +726,10 @@ async function saveSettings() {
 
     const body = {
         lm_studio_url: $('#cfg-lm-studio-url').value.trim() || undefined,
+        // Sent even when empty, unlike the other fields: `|| undefined` would
+        // strip it and make a configured key impossible to clear from the UI.
+        // `openSettings` always populates it, so an unchanged save is a no-op.
+        lm_studio_api_key: $('#cfg-lm-studio-api-key').value,
         lm_studio_timeout: parseFloat($('#cfg-timeout').value) || undefined,
         search_provider: $('#cfg-search-provider').value || undefined,
         searxng_url: $('#cfg-searxng-url').value.trim() || undefined,
@@ -753,8 +758,9 @@ async function saveSettings() {
             dom.settingsStatus.textContent = `Updated: ${keys.join(', ')}`;
             dom.settingsStatus.style.color = '#2e7d32';
 
-            // If LM Studio URL changed, refresh models
-            if ('lm_studio_url' in changed) {
+            // The model list is fetched with the backend credentials, so a
+            // rejected key shows up as an empty catalog — refresh on either.
+            if ('lm_studio_url' in changed || 'lm_studio_api_key' in changed) {
                 await loadModels();
             }
         }

@@ -271,6 +271,7 @@ SEARXNG_URL=http://searxng:8080   # SearXNG 地址（Docker 服务名）
 LM_STUDIO_URL=http://host.docker.internal:1234/v1   # LM Studio
 # LM_STUDIO_URL=http://host.docker.internal:11434/v1 # Ollama
 LM_STUDIO_TIMEOUT=120.0       # LLM 请求超时时间
+# LM_STUDIO_API_KEY=...       # Bearer 令牌；仅当后端要求认证时设置（如 vLLM）
 
 # --- 中间件服务器 ---
 MIDDLEWARE_HOST=0.0.0.0
@@ -351,7 +352,7 @@ LOG_LEVEL=INFO
 | LM Studio 不可访问 | 502 — `{"error": "LM Studio not reachable at http://..."}` |
 | SearXNG 不可访问 | 502 — `{"error": "Search engine not available"}` |
 | SearXNG 无结果 | 空结果传递给 LLM — 自然地告知用户 |
-| 工具循环超限 | 200 — 返回部分响应，`finish_reason: "tool_loop_max"` |
+| 工具循环超限 | 200 — 返回部分响应，`finish_reason: "stop"` |
 | 客户端发送格式错误的工具定义 | 400 — 验证错误 |
 | 触发频率限制 | 429 — `{"error": "Too many requests"}` |
 

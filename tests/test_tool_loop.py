@@ -3,13 +3,16 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
+from llm_search.config import runtime_config
 from llm_search.search.base import SearchProvider, SearchResult
 from llm_search.fetch_page import extract_text_from_html, validate_url
 from llm_search.tool_loop import (
     LMStudioError,
     ToolLoopExhaustedError,
+    call_lm_studio,
     call_lm_studio_streaming,
     extract_assistant_message,
     is_context_overflow,
@@ -247,7 +250,7 @@ class TestToolLoop:
             )
 
         # Should return a fallback, not raise an error
-        assert result["finish_reason"] == "tool_loop_max"
+        assert result["finish_reason"] == "stop"
         assert result["searches"] >= 5  # At least 5 searches happened
         assert "unable to synthesize" in result["content"].lower()
         assert "Search results:" in result["content"]
@@ -473,7 +476,7 @@ class TestToolLoop:
         assert result.get("tool_calls") is not None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "read_file"
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
         assert result["content"] == "Let me read that file."
         assert result["searches"] == 0
         assert result["iterations"] == 1
@@ -518,7 +521,7 @@ class TestToolLoop:
         assert result.get("tool_calls") is not None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "read_file"
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
         assert result["searches"] == 1
         assert len(provider._calls) == 1  # web_search was executed
 
@@ -563,7 +566,7 @@ class TestToolLoop:
         names = [tc["function"]["name"] for tc in result["tool_calls"]]
         assert "read_file" in names
         assert "bash" in names
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
 
     @pytest.mark.asyncio
     async def test_hallucination_blocked_even_with_client_tools(self):
@@ -892,9 +895,11 @@ class TestRunToolLoopStreaming:
             for e in events
             if e.startswith("data: ") and e[6:].strip() != "[DONE]"
         ]
-        # Last content chunk should have finish_reason "tool_loop_max"
+        # Last content chunk should have finish_reason "stop": the loop
+        # bailed out on max iterations, but the fallback is a complete
+        # message, so the wire value stays standard OpenAI vocabulary.
         last_chunk = content_events[-1]
-        assert last_chunk["choices"][0]["finish_reason"] == "tool_loop_max"
+        assert last_chunk["choices"][0]["finish_reason"] == "stop"
         fallback_text = last_chunk["choices"][0]["delta"].get("content", "")
         assert "unable to synthesize" in fallback_text.lower()
 
@@ -1119,7 +1124,7 @@ class TestRunToolLoopStreaming:
         assert len(tool_deltas) == 1  # One passthrough tool call
         tc = tool_deltas[0]["choices"][0]["delta"]["tool_calls"][0]
         assert tc["function"]["name"] == "read_file"
-        assert tool_deltas[0]["choices"][0]["finish_reason"] == "tool_use"
+        assert tool_deltas[0]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 
@@ -1233,3 +1238,241 @@ class TestFetchPageInToolLoop:
 
         assert result["content"] == "I read the page."
         assert result["tool_calls_count"] == 1
+
+
+def _mock_async_client(post_result=None, post_side_effect=None, stream_ctx=None):
+    """Build a patched-``httpx.AsyncClient`` context manager.
+
+    Returns ``(client_ctx, client)`` so callers can assert on the recorded
+    call kwargs (``client.post.call_args`` / ``client.stream.call_args``).
+    """
+    client = MagicMock()
+    if stream_ctx is not None:
+        client.stream = MagicMock(return_value=stream_ctx)
+    else:
+        client.post = AsyncMock(
+            return_value=post_result, side_effect=post_side_effect
+        )
+    client_ctx = MagicMock()
+    client_ctx.__aenter__ = AsyncMock(return_value=client)
+    client_ctx.__aexit__ = AsyncMock(return_value=None)
+    return client_ctx, client
+
+
+def _sse_stream(lines: list):
+    """A patched ``client.stream(...)`` context manager yielding SSE lines."""
+    response = MagicMock()
+    response.status_code = 200
+    response.aiter_lines = MagicMock(return_value=async_gen_from(lines))
+    response.raise_for_status = MagicMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=response)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    return ctx
+
+
+class TestBackendAuthHeader:
+    """The backend API key is sent as a Bearer token when configured.
+
+    Every test pins ``runtime_config.lm_studio_api_key`` explicitly: Settings
+    reads ``.env`` from the CWD and pytest runs from the repo root, so a real
+    key in a developer's ``.env`` would otherwise leak in and make these
+    assertions environment-dependent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sends_bearer_header_when_key_configured(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "sk-test-123")
+        client_ctx, client = _mock_async_client(
+            post_result=MagicMock(
+                json=MagicMock(return_value=make_mock_lm_response(content="hi")),
+                raise_for_status=MagicMock(),
+            )
+        )
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            await call_lm_studio(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                model="qwen3.8-27b",
+                lm_studio_url="http://localhost:18020/v1",
+            )
+
+        assert client.post.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer sk-test-123"
+        }
+
+    @pytest.mark.asyncio
+    async def test_sends_no_header_when_key_absent(self, monkeypatch):
+        """LM Studio and Ollama take no auth — an empty header set keeps them working."""
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "")
+        client_ctx, client = _mock_async_client(
+            post_result=MagicMock(
+                json=MagicMock(return_value=make_mock_lm_response(content="hi")),
+                raise_for_status=MagicMock(),
+            )
+        )
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            await call_lm_studio(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            )
+
+        assert client.post.call_args.kwargs["headers"] == {}
+
+    @pytest.mark.asyncio
+    async def test_streaming_sends_bearer_header(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "sk-test-123")
+        client_ctx, client = _mock_async_client(stream_ctx=_sse_stream(["data: [DONE]"]))
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            async for _ in call_lm_studio_streaming(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                model="qwen3.8-27b",
+                lm_studio_url="http://localhost:18020/v1",
+            ):
+                pass
+
+        assert client.stream.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer sk-test-123"
+        }
+
+    @pytest.mark.asyncio
+    async def test_401_without_a_key_names_the_missing_setting(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "")
+        request = httpx.Request("POST", "http://localhost:18020/v1/chat/completions")
+        response = httpx.Response(401, request=request, text="Unauthorized")
+        client_ctx, _ = _mock_async_client(
+            post_side_effect=httpx.HTTPStatusError(
+                "401", request=request, response=response
+            )
+        )
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            with pytest.raises(LMStudioError) as excinfo:
+                await call_lm_studio(
+                    messages=[{"role": "user", "content": "Hi"}],
+                    tools=[],
+                    model="qwen3.8-27b",
+                    lm_studio_url="http://localhost:18020/v1",
+                )
+
+        assert excinfo.value.status_code == 401
+        assert "LM_STUDIO_API_KEY" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_401_with_a_key_says_the_key_was_rejected(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "wrong-key")
+        request = httpx.Request("POST", "http://localhost:18020/v1/chat/completions")
+        response = httpx.Response(401, request=request, text="Unauthorized")
+        client_ctx, _ = _mock_async_client(
+            post_side_effect=httpx.HTTPStatusError(
+                "401", request=request, response=response
+            )
+        )
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            with pytest.raises(LMStudioError) as excinfo:
+                await call_lm_studio(
+                    messages=[{"role": "user", "content": "Hi"}],
+                    tools=[],
+                    model="qwen3.8-27b",
+                    lm_studio_url="http://localhost:18020/v1",
+                )
+
+        assert "rejected" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_401_is_not_mistaken_for_a_context_overflow(self, monkeypatch):
+        """`is_context_overflow` must not reclassify an auth failure as a 400."""
+        monkeypatch.setattr(runtime_config, "lm_studio_api_key", "")
+        request = httpx.Request("POST", "http://localhost:18020/v1/chat/completions")
+        response = httpx.Response(401, request=request, text="Unauthorized")
+        client_ctx, _ = _mock_async_client(
+            post_side_effect=httpx.HTTPStatusError(
+                "401", request=request, response=response
+            )
+        )
+
+        with patch("llm_search.tool_loop.httpx.AsyncClient", return_value=client_ctx):
+            with pytest.raises(LMStudioError) as excinfo:
+                await call_lm_studio(
+                    messages=[{"role": "user", "content": "Hi"}],
+                    tools=[],
+                    model="qwen3.8-27b",
+                    lm_studio_url="http://localhost:18020/v1",
+                )
+
+        assert is_context_overflow(excinfo.value) is False
+
+
+class TestReasoningFieldNames:
+    """Chain-of-thought field name differs by backend."""
+
+    @pytest.mark.asyncio
+    async def test_relays_vllm_style_reasoning_field(self):
+        """vLLM emits `reasoning`; LM Studio/llama.cpp emit `reasoning_content`."""
+        provider = FakeSearchProvider()
+        sse_chunks = [
+            make_sse_chunk({"role": "assistant"}),
+            make_sse_chunk({"reasoning": "Let me think."}),
+            make_sse_chunk({"content": "42"}, finish_reason="stop"),
+        ]
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=make_mock_lm_response(content="42")),
+        ), patch(
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
+        ):
+            events = []
+            async for sse_str in run_tool_loop_streaming(
+                messages=[{"role": "user", "content": "What is 6*7?"}],
+                search_provider=provider,
+                chatcmpl_id="test-reasoning",
+                created=1000,
+                model="qwen3.8-27b",
+                lm_studio_url="http://localhost:18020/v1",
+            ):
+                events.append(sse_str)
+
+        joined = "".join(events)
+        assert "Let me think." in joined
+        assert "42" in joined
+
+    @pytest.mark.asyncio
+    async def test_still_relays_llama_cpp_reasoning_content(self):
+        """The original field name keeps working — this is a fallback, not a swap."""
+        provider = FakeSearchProvider()
+        sse_chunks = [
+            make_sse_chunk({"role": "assistant"}),
+            make_sse_chunk({"reasoning_content": "Thinking."}),
+            make_sse_chunk({"content": "Done"}, finish_reason="stop"),
+        ]
+
+        with patch(
+            "llm_search.tool_loop.call_lm_studio",
+            new=AsyncMock(return_value=make_mock_lm_response(content="Done")),
+        ), patch(
+            "llm_search.tool_loop.call_lm_studio_streaming",
+            new=_make_streaming_mock(sse_chunks),
+        ):
+            events = []
+            async for sse_str in run_tool_loop_streaming(
+                messages=[{"role": "user", "content": "Hi"}],
+                search_provider=provider,
+                chatcmpl_id="test-reasoning-legacy",
+                created=1000,
+                model="test-model",
+                lm_studio_url="http://localhost:1234/v1",
+            ):
+                events.append(sse_str)
+
+        joined = "".join(events)
+        assert "Thinking." in joined
+        assert "Done" in joined
