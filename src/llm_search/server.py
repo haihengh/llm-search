@@ -382,7 +382,9 @@ async def chat_completions(request: Request, body: ChatRequest):
                         "role": "assistant",
                         "content": str(exc),
                     },
-                    "finish_reason": "tool_loop_max",
+                    # "stop", not a custom value: OpenAI-compatible clients
+                    # reject an unrecognized finish_reason. See tool_loop.py.
+                    "finish_reason": "stop",
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             },

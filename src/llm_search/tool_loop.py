@@ -678,7 +678,11 @@ async def run_tool_loop(
                 "tool_calls_count": total_tool_calls,
                 "iterations": iteration,
                 "searches": total_searches,
-                "finish_reason": "tool_use",
+                # OpenAI vocabulary, not Anthropic's "tool_use": this dict
+                # feeds the /v1/chat/completions response, and a strict
+                # OpenAI client rejects an unrecognized finish_reason
+                # outright rather than falling back to a default.
+                "finish_reason": "tool_calls",
                 "stats": stats.to_dict(),
             }
 
@@ -712,7 +716,11 @@ async def run_tool_loop(
         "tool_calls_count": total_tool_calls,
         "iterations": max_iter,
         "searches": total_searches,
-        "finish_reason": "tool_loop_max",
+        # OpenAI vocabulary — same constraint as the "tool_calls" branch
+        # above. "stop" rather than a custom value because the fallback is a
+        # complete message, not truncated output; `iterations` already
+        # carries the bail-out signal for anyone who needs it.
+        "finish_reason": "stop",
         "stats": stats.to_dict(),
     }
 
@@ -1279,7 +1287,7 @@ async def run_tool_loop_streaming(
                     is_last = (i == len(passthrough_tool_calls) - 1)
                     yield _chunk_sse(
                         {"tool_calls": [tc]},
-                        "tool_use" if is_last else None,
+                        "tool_calls" if is_last else None,
                     )
                 stats.total_iterations = iteration
                 # Record stats BEFORE yielding — consumers (including our
@@ -1318,7 +1326,7 @@ async def run_tool_loop_streaming(
         if stats_out is not None:
             stats_out.append(stats.to_dict())
         yield _chunk_sse({"role": "assistant"})
-        yield _chunk_sse({"content": fallback}, "tool_loop_max")
+        yield _chunk_sse({"content": fallback}, "stop")
         yield _stats_sse()
         yield "data: [DONE]\n\n"
 

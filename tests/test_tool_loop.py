@@ -250,7 +250,7 @@ class TestToolLoop:
             )
 
         # Should return a fallback, not raise an error
-        assert result["finish_reason"] == "tool_loop_max"
+        assert result["finish_reason"] == "stop"
         assert result["searches"] >= 5  # At least 5 searches happened
         assert "unable to synthesize" in result["content"].lower()
         assert "Search results:" in result["content"]
@@ -476,7 +476,7 @@ class TestToolLoop:
         assert result.get("tool_calls") is not None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "read_file"
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
         assert result["content"] == "Let me read that file."
         assert result["searches"] == 0
         assert result["iterations"] == 1
@@ -521,7 +521,7 @@ class TestToolLoop:
         assert result.get("tool_calls") is not None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "read_file"
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
         assert result["searches"] == 1
         assert len(provider._calls) == 1  # web_search was executed
 
@@ -566,7 +566,7 @@ class TestToolLoop:
         names = [tc["function"]["name"] for tc in result["tool_calls"]]
         assert "read_file" in names
         assert "bash" in names
-        assert result["finish_reason"] == "tool_use"
+        assert result["finish_reason"] == "tool_calls"
 
     @pytest.mark.asyncio
     async def test_hallucination_blocked_even_with_client_tools(self):
@@ -895,9 +895,11 @@ class TestRunToolLoopStreaming:
             for e in events
             if e.startswith("data: ") and e[6:].strip() != "[DONE]"
         ]
-        # Last content chunk should have finish_reason "tool_loop_max"
+        # Last content chunk should have finish_reason "stop": the loop
+        # bailed out on max iterations, but the fallback is a complete
+        # message, so the wire value stays standard OpenAI vocabulary.
         last_chunk = content_events[-1]
-        assert last_chunk["choices"][0]["finish_reason"] == "tool_loop_max"
+        assert last_chunk["choices"][0]["finish_reason"] == "stop"
         fallback_text = last_chunk["choices"][0]["delta"].get("content", "")
         assert "unable to synthesize" in fallback_text.lower()
 
@@ -1122,7 +1124,7 @@ class TestRunToolLoopStreaming:
         assert len(tool_deltas) == 1  # One passthrough tool call
         tc = tool_deltas[0]["choices"][0]["delta"]["tool_calls"][0]
         assert tc["function"]["name"] == "read_file"
-        assert tool_deltas[0]["choices"][0]["finish_reason"] == "tool_use"
+        assert tool_deltas[0]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 

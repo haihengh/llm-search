@@ -352,7 +352,7 @@ LOG_LEVEL=INFO
 | LM Studio 不可访问 | 502 — `{"error": "LM Studio not reachable at http://..."}` |
 | SearXNG 不可访问 | 502 — `{"error": "Search engine not available"}` |
 | SearXNG 无结果 | 空结果传递给 LLM — 自然地告知用户 |
-| 工具循环超限 | 200 — 返回部分响应，`finish_reason: "tool_loop_max"` |
+| 工具循环超限 | 200 — 返回部分响应，`finish_reason: "stop"` |
 | 客户端发送格式错误的工具定义 | 400 — 验证错误 |
 | 触发频率限制 | 429 — `{"error": "Too many requests"}` |
 

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Actionable 401/403 errors** — a rejected credential now says whether *no* key is configured or the configured key was rejected, instead of surfacing a bare `returned 401: {"error":"Unauthorized"}`.
 
 ### Fixed
+- **Non-standard `finish_reason` on the OpenAI-compatible route** — `/v1/chat/completions` reported `finish_reason: "tool_use"` when the model called a tool, and `"tool_loop_max"` when the tool loop hit its iteration cap. Neither is valid OpenAI vocabulary (the spec requires `tool_calls` for the first), and strict clients reject the whole turn rather than falling back to a default. They now use standard values — `"tool_calls"` and `"stop"` respectively; the bail-out is still visible to anyone who needs it via the response's `iterations` field. `/v1/messages` is unaffected and still reports Anthropic's `stop_reason: "tool_use"`, and the `/v1/responses` status mapping was updated so tool-call turns still count as `completed`.
 - **Chain-of-thought silently dropped on backends that name the field `reasoning`** — the streaming path read only `delta.reasoning_content` (LM Studio / llama.cpp); vLLM and other backends emit `delta.reasoning`, so their thinking was discarded. Now reads either.
 - **API keys written to the log in plaintext** — `PUT /v1/config` logged the changed values verbatim, which included `search_api_key` and would have included the new backend key. Any `*_api_key` field is now redacted.
 
