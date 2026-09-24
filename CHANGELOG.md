@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-23
+
 ### Added
 - **Backend API key support (`LM_STUDIO_API_KEY`)** — the middleware can now authenticate to its LLM backend. It previously sent no auth header at all, so an OpenAI-compatible server that requires one (vLLM, and others that answer unauthenticated requests with 401) could not be used. Set `LM_STUDIO_API_KEY` in the environment / `.env`, or change it at runtime via `PUT /v1/config` or the chat settings modal. Empty by default, so LM Studio and Ollama are unaffected. The key is sent only to the configured LLM backend — never on the `fetch_page` path, which retrieves arbitrary user-supplied URLs.
 - **Actionable 401/403 errors** — a rejected credential now says whether *no* key is configured or the configured key was rejected, instead of surfacing a bare `returned 401: {"error":"Unauthorized"}`.
@@ -220,3 +222,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.3.1]: https://github.com/haihengh/llm-search/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/haihengh/llm-search/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/haihengh/llm-search/compare/v0.2.7...v0.2.8
+[0.4.0]: https://github.com/haihengh/llm-search/compare/v0.3.3...v0.4.0
